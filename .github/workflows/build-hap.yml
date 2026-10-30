@@ -4,15 +4,15 @@ on:
   workflow_dispatch:
     inputs:
       sample_dir:
-        description: '示例目录名，如 flutter_music_player'
+        description: '示例目录名，如 flutter_music_player / channel_demo'
         required: true
         default: 'flutter_music_player'
       samples_branch:
         description: 'samples 分支'
         default: 'master'
       flutter_ref:
-        description: 'flutter_flutter 分支/标签（与示例版本对齐）'
-        default: 'oh-3.35.7-release'
+        description: 'flutter_flutter 分支/标签'
+        default: 'oh-3.41.9-release'
 
 env:
   PUB_HOSTED_URL: https://pub.flutter-io.cn
@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      # 直接从 GitCode 拉源码，不用 fork
+      # ========== 1. 拉源码 ==========
       - name: Clone flutter_samples (GitCode)
         run: |
           git clone --depth 1 -b ${{ inputs.samples_branch }} \
@@ -34,49 +34,86 @@ jobs:
           git clone --depth 1 -b ${{ inputs.flutter_ref }} \
             https://gitcode.com/CPF-Flutter/flutter_flutter.git flutter_flutter
 
+      # ========== 2. 基础工具 ==========
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: '17' }
       - uses: actions/setup-node@v4
         with: { node-version: '18' }
 
+      # ========== 3. 安装 OpenHarmony SDK（动态查询最新公共版）==========
       - name: Install OpenHarmony SDK
         run: |
-          set -e
-          # 固定版本的日构建公共 SDK;若链接失效,去 ci.openharmony.cn 的 ohos-sdk-public 流水线换最新一条
-          SDK_URL="https://cidownload.openharmony.cn/version/Daily_Version/OpenHarmony_6.1.0.27/20260111_020523/version-Daily_Version-OpenHarmony_6.1.0.27-20260111_020523-ohos-sdk-public.tar.gz"
-          curl -fL --retry 3 -o /tmp/ohos-sdk.tar.gz "$SDK_URL"
+          set -euo pipefail
+
+          curl -fsSL 'https://dcp.openharmony.cn/api/daily_build/build/list/component' \
+            -H 'Content-Type: application/json' \
+            -H 'Accept: application/json, text/plain, */*' \
+            --data-raw '{"projectName":"openharmony","branch":"master","withDomain":1}' \
+            -o /tmp/components.json
+          echo "==== API 原始返回(前 800 字节) ===="; head -c 800 /tmp/components.json; echo
+
+          SDK_URL=""
+          for pat in ohos-sdk-public ohos-sdk-full; do
+            SDK_URL=$(jq -r --arg p "$pat" \
+              '[.data.list.dataList[]? | select((.name // .component // "") | test($p))][0].obsPath // empty' \
+              /tmp/components.json)
+            [ -n "$SDK_URL" ] && break
+          done
+          echo "解析到的下载地址: $SDK_URL"
+          [ -n "$SDK_URL" ] || { echo "::error::未能从 DCP 接口解析出 SDK 地址"; exit 1; }
+
+          curl -fL --retry 3 -A "Mozilla/5.0" -o /tmp/ohos-sdk.tar.gz "$SDK_URL"
+          ls -lh /tmp/ohos-sdk.tar.gz
+
           mkdir -p $HOME/ohos-sdk-unpack
           tar -zxf /tmp/ohos-sdk.tar.gz -C $HOME/ohos-sdk-unpack
           cd $HOME/ohos-sdk-unpack/linux
-          ls -la                      # 出错时方便看包里到底有什么
-          unzip -q native-linux-x64-*.zip
-          unzip -q toolchains-linux-x64-*.zip
-          unzip -q ets-linux-x64-*.zip
-          unzip -q js-linux-x64-*.zip
+          ls -la
+          unzip -q -o native-linux-x64-*.zip
+          unzip -q -o toolchains-linux-x64-*.zip
+          unzip -q -o ets-linux-x64-*.zip
+          unzip -q -o js-linux-x64-*.zip
 
-          # 组装 DevEco 风格目录 + 软链兼容 flutter/hvigor 的不同找法
           OHOS=$HOME/ohos-sdk
           mkdir -p $OHOS/default/openharmony
           mv native toolchains ets js $OHOS/default/openharmony/
           API=$(jq -r '.apiVersion // empty' $OHOS/default/openharmony/toolchains/oh-uni-package.json || true)
+          echo "检测到 SDK API 版本: $API"
+          echo "OHOS_API=$API" >> $GITHUB_ENV
           [ -n "$API" ] && mkdir -p $OHOS/openharmony && ln -sfn ../default/openharmony $OHOS/openharmony/$API
           for d in ets js native toolchains; do ln -sfn default/openharmony/$d $OHOS/$d; done
 
           echo "DEVECO_SDK_HOME=$OHOS" >> $GITHUB_ENV
           echo "OHOS_SDK_HOME=$OHOS" >> $GITHUB_ENV
-          echo "HDC_HOME=$OHOS/default/openharmony/toolchains" >> $GITHUB_ENV
           echo "$OHOS/default/openharmony/toolchains" >> $GITHUB_PATH
 
-      - name: Build HAP
+      # ========== 4. 对齐示例 compileSdkVersion（在 build 之前）==========
+      - name: 对齐示例 compileSdkVersion 到已装 SDK
+        run: |
+          PROFILE=samples/${{ inputs.sample_dir }}/ohos/build-profile.json5
+          API="${OHOS_API:-}"
+          if [ -f "$PROFILE" ] && [ -n "$API" ]; then
+            sed -i -E 's/"(compile|target)SdkVersion"[[:space:]]*:[[:space:]]*"[^"]*"/"\1SdkVersion": '"$API"'/g' "$PROFILE"
+            echo "==== 修改后的 build-profile.json5 ===="
+            grep -n "SdkVersion" "$PROFILE" || true
+          else
+            echo "未找到 profile($PROFILE) 或 API 版本未知，跳过"
+          fi
+
+      # ========== 5. Flutter 进 PATH ==========
+      - name: Add flutter to PATH
         run: echo "$PWD/flutter_flutter/bin" >> $GITHUB_PATH
 
-      - name: flutter build
+      # ========== 6. 构建 ==========
+      - name: Build HAP (unsigned)
         working-directory: samples/${{ inputs.sample_dir }}
         run: |
           flutter --version
+          flutter doctor -v || true
           flutter pub get
           flutter build hap --release --no-codesign --target-platform ohos-arm64
 
+      # ========== 7. 产物上传 ==========
       - name: Upload HAP
         uses: actions/upload-artifact@v4
         with:
