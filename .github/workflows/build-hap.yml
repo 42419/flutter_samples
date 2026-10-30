@@ -45,26 +45,51 @@ jobs:
         run: |
           set -euo pipefail
 
-          curl -fsSL 'https://dcp.openharmony.cn/api/daily_build/build/list/component' \
-            -H 'Content-Type: application/json' \
-            -H 'Accept: application/json, text/plain, */*' \
-            --data-raw '{"projectName":"openharmony","branch":"master","withDomain":1}' \
-            -o /tmp/components.json
-          echo "==== API 原始返回(前 800 字节) ===="; head -c 800 /tmp/components.json; echo
+          # 1. 查询 DCP 日构建组件列表（完整参数版）
+          query_component() {
+            component=$1
+            curl -fsSL 'https://dcp.openharmony.cn/api/daily_build/build/list/component' \
+              -H 'Accept: application/json, text/plain, */*' \
+              -H 'Content-Type: application/json' \
+              --data-raw '{
+                "projectName":"openharmony",
+                "branch":"master",
+                "pageNum":1,
+                "pageSize":10,
+                "deviceLevel":"",
+                "component":"'"${component}"'",
+                "type":1,
+                "startTime":"2025010100000000",
+                "endTime":"20990101235959",
+                "sortType":"",
+                "sortField":"",
+                "hardwareBoard":"",
+                "buildStatus":"success",
+                "buildFailReason":"",
+                "withDomain":1
+              }'
+          }
 
-          SDK_URL=""
-          for pat in ohos-sdk-public ohos-sdk-full; do
-            SDK_URL=$(jq -r --arg p "$pat" \
-              '[.data.list.dataList[]? | select((.name // .component // "") | test($p))][0].obsPath // empty' \
-              /tmp/components.json)
-            [ -n "$SDK_URL" ] && break
-          done
+          query_component "ohos-sdk-public" > /tmp/pub.json
+          echo "==== ohos-sdk-public 返回(前 1500 字节) ===="; head -c 1500 /tmp/pub.json; echo
+
+          SDK_URL=$(jq -r '.data.list.dataList[0].obsPath // empty' /tmp/pub.json)
+
+          # public 查不到就试 full
+          if [ -z "$SDK_URL" ]; then
+            query_component "ohos-sdk-full" > /tmp/full.json
+            echo "==== ohos-sdk-full 返回(前 1500 字节) ===="; head -c 1500 /tmp/full.json; echo
+            SDK_URL=$(jq -r '.data.list.dataList[0].obsPath // empty' /tmp/full.json)
+          fi
+
           echo "解析到的下载地址: $SDK_URL"
-          [ -n "$SDK_URL" ] || { echo "::error::未能从 DCP 接口解析出 SDK 地址"; exit 1; }
+          [ -n "$SDK_URL" ] || { echo "::error::未能解析出 SDK 地址"; exit 1; }
 
+          # 2. 下载
           curl -fL --retry 3 -A "Mozilla/5.0" -o /tmp/ohos-sdk.tar.gz "$SDK_URL"
           ls -lh /tmp/ohos-sdk.tar.gz
 
+          # 3. 解压组装（这段保持不变）
           mkdir -p $HOME/ohos-sdk-unpack
           tar -zxf /tmp/ohos-sdk.tar.gz -C $HOME/ohos-sdk-unpack
           cd $HOME/ohos-sdk-unpack/linux
