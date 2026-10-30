@@ -16,12 +16,13 @@ on:
 
 env:
   PUB_HOSTED_URL: https://pub.flutter-io.cn
-  FLUTTER_STORAGE_BASE_URL: https://flutter-ohos.obs.cn-south-1.myhuaweicloud.com
+  FLUTTER_STORAGE_BASE_URL: https://storage.flutter-io.cn
+  FLUTTER_OHOS_STORAGE_BASE_URL: https://flutter-ohos.obs.cn-south-1.myhuaweicloud.com
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       # ========== 1. 拉源码 ==========
       - name: Clone flutter_samples (GitCode)
@@ -40,12 +41,11 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: '18' }
 
-      # ========== 3. 安装 OpenHarmony SDK（动态查询最新公共版）==========
-      - name: Install OpenHarmony SDK
+      # ========== 3. 查询 SDK 最新下载地址 ==========
+      - name: Query OHOS SDK URL
+        id: sdk
         run: |
           set -euo pipefail
-
-          # 1. 查询 DCP 日构建组件列表（完整参数版）
           query_component() {
             component=$1
             curl -fsSL 'https://dcp.openharmony.cn/api/daily_build/build/list/component' \
@@ -71,31 +71,45 @@ jobs:
           }
 
           query_component "ohos-sdk-public" > /tmp/pub.json
-          echo "==== ohos-sdk-public 返回(前 1500 字节) ===="; head -c 1500 /tmp/pub.json; echo
-
-          SDK_URL=$(jq -r '.data.list.dataList[0].obsPath // empty' /tmp/pub.json)
-
-          # public 查不到就试 full
-          if [ -z "$SDK_URL" ]; then
+          URL=$(jq -r '.data.list.dataList[0].obsPath // empty' /tmp/pub.json)
+          if [ -z "$URL" ]; then
             query_component "ohos-sdk-full" > /tmp/full.json
-            echo "==== ohos-sdk-full 返回(前 1500 字节) ===="; head -c 1500 /tmp/full.json; echo
-            SDK_URL=$(jq -r '.data.list.dataList[0].obsPath // empty' /tmp/full.json)
+            URL=$(jq -r '.data.list.dataList[0].obsPath // empty' /tmp/full.json)
           fi
+          [ -n "$URL" ] || { echo "::error::未能解析出 SDK 地址"; exit 1; }
 
-          echo "解析到的下载地址: $SDK_URL"
-          [ -n "$SDK_URL" ] || { echo "::error::未能解析出 SDK 地址"; exit 1; }
+          # 从 URL 提取版本标识做缓存 key，如 OpenHarmony_7.1.0.22_20261030_180131
+          VER=$(echo "$URL" | sed -E 's|.*/Daily_Version/||; s|/[^/]+$||; s|/|_|g')
+          echo "url=$URL" >> $GITHUB_OUTPUT
+          echo "ver=$VER" >> $GITHUB_OUTPUT
+          echo "SDK URL : $URL"
+          echo "CacheKey: ohos-sdk-$VER"
 
-          # 2. 下载
-          curl -fL --retry 3 -A "Mozilla/5.0" -o /tmp/ohos-sdk.tar.gz "$SDK_URL"
-          ls -lh /tmp/ohos-sdk.tar.gz
+      # ========== 4. SDK 缓存（命中则跳过 3.5G 下载）==========
+      - name: Cache OHOS SDK tarball
+        id: sdk-cache
+        uses: actions/cache@v4
+        with:
+          path: .sdk-cache/ohos-sdk.tar.gz
+          key: ohos-sdk-${{ steps.sdk.outputs.ver }}
 
-          # 3. 解压组装（自动探测目录结构，兼容 7.x 新包布局）
+      - name: Download OHOS SDK
+        if: steps.sdk-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p .sdk-cache
+          curl -fL --retry 3 -A "Mozilla/5.0" -o .sdk-cache/ohos-sdk.tar.gz "${{ steps.sdk.outputs.url }}"
+          ls -lh .sdk-cache/ohos-sdk.tar.gz
+
+      # ========== 5. 解压组装（自动探测目录结构）==========
+      - name: Assemble OHOS SDK
+        run: |
+          set -euo pipefail
           mkdir -p $HOME/ohos-sdk-unpack
-          tar -zxf /tmp/ohos-sdk.tar.gz -C $HOME/ohos-sdk-unpack
+          tar -zxf .sdk-cache/ohos-sdk.tar.gz -C $HOME/ohos-sdk-unpack
           echo "==== 解压后顶层结构 ===="
           ls -la $HOME/ohos-sdk-unpack
 
-          # 找 native 组件 zip 所在目录；若包里已是解压好的目录则找 native/ 目录
           SRC=$(find $HOME/ohos-sdk-unpack -maxdepth 3 -type f -name "native-linux-x64-*.zip" -printf '%h\n' | head -1)
           if [ -z "$SRC" ]; then
             SRC=$(find $HOME/ohos-sdk-unpack -maxdepth 4 -type d -name native -printf '%h\n' | head -1)
@@ -105,12 +119,10 @@ jobs:
           cd "$SRC"
           ls -la
 
-          # 若是 zip 形式则解压
           for z in native-linux-x64-*.zip toolchains-linux-x64-*.zip ets-linux-x64-*.zip js-linux-x64-*.zip; do
             [ -e "$z" ] && unzip -q -o "$z" || true
           done
 
-          # 校验四个组件目录齐全
           for d in native toolchains ets js; do
             [ -d "$d" ] || { echo "::error::缺少组件目录: $d（当前目录内容见上方 ls）"; exit 1; }
           done
@@ -128,7 +140,7 @@ jobs:
           echo "OHOS_SDK_HOME=$OHOS" >> $GITHUB_ENV
           echo "$OHOS/default/openharmony/toolchains" >> $GITHUB_PATH
 
-      # ========== 4. 对齐示例 compileSdkVersion（在 build 之前）==========
+      # ========== 6. 对齐示例 compileSdkVersion ==========
       - name: 对齐示例 compileSdkVersion 到已装 SDK
         run: |
           PROFILE=samples/${{ inputs.sample_dir }}/ohos/build-profile.json5
@@ -141,11 +153,11 @@ jobs:
             echo "未找到 profile($PROFILE) 或 API 版本未知，跳过"
           fi
 
-      # ========== 5. Flutter 进 PATH ==========
+      # ========== 7. Flutter 进 PATH ==========
       - name: Add flutter to PATH
         run: echo "$PWD/flutter_flutter/bin" >> $GITHUB_PATH
 
-      # ========== 6. 构建 ==========
+      # ========== 8. 构建 ==========
       - name: Build HAP (unsigned)
         working-directory: samples/${{ inputs.sample_dir }}
         run: |
@@ -154,7 +166,7 @@ jobs:
           flutter pub get
           flutter build hap --release --no-codesign --target-platform ohos-arm64
 
-      # ========== 7. 产物上传 ==========
+      # ========== 9. 产物上传 ==========
       - name: Upload HAP
         uses: actions/upload-artifact@v4
         with:
