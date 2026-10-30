@@ -114,7 +114,7 @@ jobs:
           if [ -z "$SRC" ]; then
             SRC=$(find $HOME/ohos-sdk-unpack -maxdepth 4 -type d -name native -printf '%h\n' | head -1)
           fi
-          [ -n "$SRC" ] || { echo "::error::未找到 native 组件，包结构未知"; exit 1; }
+          [ -n "$SRC" ] || { echo "::error::未找到 native 组件"; exit 1; }
           echo "组件所在目录: $SRC"
           cd "$SRC"
           ls -la
@@ -122,22 +122,38 @@ jobs:
           for z in native-linux-x64-*.zip toolchains-linux-x64-*.zip ets-linux-x64-*.zip js-linux-x64-*.zip; do
             [ -e "$z" ] && unzip -q -o "$z" || true
           done
-
           for d in native toolchains ets js; do
-            [ -d "$d" ] || { echo "::error::缺少组件目录: $d（当前目录内容见上方 ls）"; exit 1; }
+            [ -d "$d" ] || { echo "::error::缺少组件: $d"; exit 1; }
           done
 
+          # ---- 布局 A：DevEco 风格，给 hvigor（DEVECO_SDK_HOME）----
           OHOS=$HOME/ohos-sdk
           mkdir -p $OHOS/default/openharmony
           mv native toolchains ets js $OHOS/default/openharmony/
-          API=$(jq -r '.apiVersion // empty' $OHOS/default/openharmony/toolchains/oh-uni-package.json || true)
+
+          # 读取 API 版本号（多种文件名都试，兜底 26）
+          API=$(jq -r '.apiVersion // empty' $OHOS/default/openharmony/toolchains/oh-uni-package.json 2>/dev/null || true)
+          [ -n "$API" ] || API=$(jq -r '.apiVersion // empty' $OHOS/default/openharmony/toolchains/package.json 2>/dev/null || true)
+          [ -n "$API" ] || API=26
           echo "检测到 SDK API 版本: $API"
           echo "OHOS_API=$API" >> $GITHUB_ENV
-          [ -n "$API" ] && mkdir -p $OHOS/openharmony && ln -sfn ../default/openharmony $OHOS/openharmony/$API
+
+          # ---- 布局 B：flutter_tools 要的（HOS_SDK_HOME 根下放数字 API 目录）----
+          HOS=$HOME/hos-sdk-root
+          mkdir -p $HOS/$API
+          for d in ets js native toolchains; do
+            ln -sfn $OHOS/default/openharmony/$d $HOS/$API/$d
+          done
+
+          # DevEco 兼容软链（保持原样）
+          mkdir -p $OHOS/openharmony && ln -sfn ../default/openharmony $OHOS/openharmony/$API
           for d in ets js native toolchains; do ln -sfn default/openharmony/$d $OHOS/$d; done
 
-          echo "DEVECO_SDK_HOME=$OHOS" >> $GITHUB_ENV
-          echo "OHOS_SDK_HOME=$OHOS" >> $GITHUB_ENV
+          # ---- 环境变量：三种都导出，覆盖 flutter_tools 和 hvigor 的不同找法 ----
+          echo "DEVECO_SDK_HOME=$OHOS" >> $GITHUB_ENV     # hvigor 用
+          echo "HOS_SDK_HOME=$HOS" >> $GITHUB_ENV        # flutter_tools 用（本次报错的就是它）
+          echo "OHOS_SDK_HOME=$HOS" >> $GITHUB_ENV       # 老版 flutter_tools 用
+          echo "HDC_HOME=$OHOS/default/openharmony/toolchains" >> $GITHUB_ENV
           echo "$OHOS/default/openharmony/toolchains" >> $GITHUB_PATH
 
       # ========== 6. 对齐示例 compileSdkVersion ==========
