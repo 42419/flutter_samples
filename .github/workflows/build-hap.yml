@@ -1,0 +1,64 @@
+name: Build OHOS HAP from GitCode
+
+on:
+  workflow_dispatch:
+    inputs:
+      sample_dir:
+        description: '示例目录名，如 flutter_music_player'
+        required: true
+        default: 'flutter_music_player'
+      samples_branch:
+        description: 'samples 分支'
+        default: 'master'
+      flutter_ref:
+        description: 'flutter_flutter 分支/标签（与示例版本对齐）'
+        default: '3.35.7-ohos'
+
+env:
+  PUB_HOSTED_URL: https://pub.flutter-io.cn
+  FLUTTER_STORAGE_BASE_URL: https://flutter-ohos.obs.cn-south-1.myhuaweicloud.com
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      # 直接从 GitCode 拉源码，不用 fork
+      - name: Clone flutter_samples (GitCode)
+        run: |
+          git clone --depth 1 -b ${{ inputs.samples_branch }} \
+            https://gitcode.com/CPF-Flutter/flutter_samples.git samples
+
+      - name: Clone flutter_flutter (GitCode)
+        run: |
+          git clone --depth 1 -b ${{ inputs.flutter_ref }} \
+            https://gitcode.com/CPF-Flutter/flutter_flutter.git flutter_flutter
+
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '17' }
+      - uses: actions/setup-node@v4
+        with: { node-version: '18' }
+
+      - name: Install OpenHarmony SDK
+        run: |
+          cd flutter_flutter
+          ./ohsdkmgr install ets:9 js:9 native:9 toolchains:9 \
+            --sdk-directory=$HOME/ohos-sdk --accept-license
+          echo "OHOS_SDK_HOME=$HOME/ohos-sdk" >> $GITHUB_ENV
+
+      - name: Build HAP
+        run: echo "$PWD/flutter_flutter/bin" >> $GITHUB_PATH
+
+      - name: flutter build
+        working-directory: samples/${{ inputs.sample_dir }}
+        run: |
+          flutter --version
+          flutter pub get
+          flutter build hap --release --no-codesign --target-platform ohos-arm64
+
+      - name: Upload HAP
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.sample_dir }}-hap
+          path: samples/${{ inputs.sample_dir }}/**/build/ohos/hap/*.hap
+          if-no-files-found: error
