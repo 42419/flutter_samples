@@ -89,15 +89,31 @@ jobs:
           curl -fL --retry 3 -A "Mozilla/5.0" -o /tmp/ohos-sdk.tar.gz "$SDK_URL"
           ls -lh /tmp/ohos-sdk.tar.gz
 
-          # 3. 解压组装（这段保持不变）
+          # 3. 解压组装（自动探测目录结构，兼容 7.x 新包布局）
           mkdir -p $HOME/ohos-sdk-unpack
           tar -zxf /tmp/ohos-sdk.tar.gz -C $HOME/ohos-sdk-unpack
-          cd $HOME/ohos-sdk-unpack/linux
+          echo "==== 解压后顶层结构 ===="
+          ls -la $HOME/ohos-sdk-unpack
+
+          # 找 native 组件 zip 所在目录；若包里已是解压好的目录则找 native/ 目录
+          SRC=$(find $HOME/ohos-sdk-unpack -maxdepth 3 -type f -name "native-linux-x64-*.zip" -printf '%h\n' | head -1)
+          if [ -z "$SRC" ]; then
+            SRC=$(find $HOME/ohos-sdk-unpack -maxdepth 4 -type d -name native -printf '%h\n' | head -1)
+          fi
+          [ -n "$SRC" ] || { echo "::error::未找到 native 组件，包结构未知"; exit 1; }
+          echo "组件所在目录: $SRC"
+          cd "$SRC"
           ls -la
-          unzip -q -o native-linux-x64-*.zip
-          unzip -q -o toolchains-linux-x64-*.zip
-          unzip -q -o ets-linux-x64-*.zip
-          unzip -q -o js-linux-x64-*.zip
+
+          # 若是 zip 形式则解压
+          for z in native-linux-x64-*.zip toolchains-linux-x64-*.zip ets-linux-x64-*.zip js-linux-x64-*.zip; do
+            [ -e "$z" ] && unzip -q -o "$z" || true
+          done
+
+          # 校验四个组件目录齐全
+          for d in native toolchains ets js; do
+            [ -d "$d" ] || { echo "::error::缺少组件目录: $d（当前目录内容见上方 ls）"; exit 1; }
+          done
 
           OHOS=$HOME/ohos-sdk
           mkdir -p $OHOS/default/openharmony
