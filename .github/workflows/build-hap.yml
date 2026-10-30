@@ -173,6 +173,22 @@ jobs:
       - name: Add flutter to PATH
         run: echo "$PWD/flutter_flutter/bin" >> $GITHUB_PATH
 
+      # ========== 7.5 安装 ohpm & hvigor（npm 免登录）==========
+      - name: Install ohpm and hvigor via npm
+        run: |
+          set -euo pipefail
+          npm config set registry https://repo.huaweicloud.com/repository/npm/
+          npm config set @ohos:registry https://repo.harmonyos.com/npm/
+          npm install -g @ohos/hvigor @ohos/hvigor-ohos-plugin
+          npm install -g @ohos/ohpm || echo "::warning::@ohos/ohpm 安装失败，先继续（构建可能不需要）"
+          # 兜底：如果 npm 包的 bin 叫 hvigor 而不是 hvigorw，做个软链
+          if ! command -v hvigorw >/dev/null && command -v hvigor >/dev/null; then
+            ln -sf "$(command -v hvigor)" "$(npm prefix -g)/bin/hvigorw"
+          fi
+          echo "==== 工具自检 ===="
+          which hvigorw && hvigorw --version || true
+          which ohpm && ohpm --version || true
+
       # ========== 8. 构建 ==========
       - name: Build HAP (unsigned)
         working-directory: samples/${{ inputs.sample_dir }}
