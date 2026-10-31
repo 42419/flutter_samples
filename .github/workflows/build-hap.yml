@@ -223,41 +223,54 @@ jobs:
             echo "未找到 profile 或 API 未知，跳过"
           fi
 
-      - name: Bootstrap hvigorw (samples 不带启动器，从 SDK 模板补齐)
+      - name: Bootstrap hvigorw (补齐 samples 缺失的启动链)
         run: |
           set -euo pipefail
           DEST="samples/${{ inputs.sample_dir }}/ohos"
           [ -d "$DEST" ] || { echo "::error::未找到 $DEST"; exit 1; }
-          echo "==== ohos 目录现状 ===="; ls -la "$DEST"
+          echo "==== ohos/hvigor 现状 ===="; ls -la "$DEST/hvigor" || true
+          echo "---- hvigor-config.json5 ----"; cat "$DEST/hvigor/hvigor-config.json5" 2>/dev/null || echo "(无)"
 
-          # 1) 启动器脚本：没有就写一个极简版（转发给 wrapper.js）
-          if [ ! -f "$DEST/hvigorw" ]; then
-            echo "hvigorw 缺失，写入最小启动器"
-            cat > "$DEST/hvigorw" <<'EOF'
-          #!/bin/sh
-          set -e
-          DIRNAME=$(cd "$(dirname "$0")" && pwd)
-          exec node "$DIRNAME/hvigor/hvigor-wrapper.js" "$@"
-          EOF
-            chmod +x "$DEST/hvigorw"
-          fi
-
-          # 2) hvigor 包装目录：工程若也没提交，从 flutter_tools 模板复制
-          if [ ! -f "$DEST/hvigor/hvigor-wrapper.js" ]; then
-            echo "hvigor/ 缺失，从 SDK 模板复制"
-            WRAP=$(find flutter_flutter/packages/flutter_tools/templates -type f -name 'hvigor-wrapper.js*' | head -1)
-            [ -n "$WRAP" ] || { echo "::error::模板中未找到 hvigor-wrapper.js"; \
-              find flutter_flutter/packages/flutter_tools/templates -iname '*hvigor*' -print; exit 1; }
-            TPL=$(dirname "$WRAP")
+          # 1) 先全仓搜索已提交的 hvigor-wrapper.js（版本与 samples 生态匹配）
+          WJS=$(find samples -type f -name 'hvigor-wrapper.js' | head -1)
+          if [ -n "$WJS" ]; then
+            echo "本地找到: $WJS"
             mkdir -p "$DEST/hvigor"
-            for f in "$TPL"/*; do
-              b=$(basename "$f"); cp "$f" "$DEST/hvigor/${b%.tmpl}"
+            cp "$WJS" "$DEST/hvigor/hvigor-wrapper.js"
+            # 同目录配套文件（properties 等）一并带上
+            for f in "$(dirname "$WJS")"/*; do
+              b=$(basename "$f")
+              [ "$b" = "hvigor-wrapper.js" ] && continue
+              cp "$f" "$DEST/hvigor/$b"
             done
+          else
+            # 2) 全仓都没有 → 从 Gitee 官方示例仓拉（该目录下 hvigorw 已确认存在）
+            echo "仓内无 wrapper.js，从 Gitee 拉取"
+            mkdir -p "$DEST/hvigor"
+            curl -fL --retry 2 -o "$DEST/hvigor/hvigor-wrapper.js" \
+              "https://gitee.com/southbridge/applications_app_samples/raw/master/code/SuperFeature/Widget/ArkTSCard/CanvasGame/hvigor/hvigor-wrapper.js" \
+              || { echo "::error::wrapper.js 拉取失败"; exit 1; }
           fi
 
+          # 3) 语法校验：确保拿到的是 JS 而不是 404 页面
+          node --check "$DEST/hvigor/hvigor-wrapper.js" \
+            || { echo "::error::wrapper.js 语法校验失败（可能拉到了 HTML 错误页）"; head -5 "$DEST/hvigor/hvigor-wrapper.js"; exit 1; }
+
+          # 4) 写入 hvigorw 启动脚本（EOF 必须与 cat 同列顶格）
+          cat > "$DEST/hvigorw" <<'EOF'
+          #!/bin/sh
+          HVIGOR_APP_HOME="`pwd -P`"
+          WRAPPER="${HVIGOR_APP_HOME}/hvigor/hvigor-wrapper.js"
+          if [ ! -r "$WRAPPER" ]; then
+            echo "ERROR: hvigor/hvigor-wrapper.js not found in ${HVIGOR_APP_HOME}" >&2
+            exit 1
+          fi
+          exec node "$WRAPPER" "$@"
+          EOF
           chmod +x "$DEST/hvigorw"
-          echo "==== bootstrap 后 ===="; ls -la "$DEST" "$DEST/hvigor"
-          echo "hvigor-wrapper.properties 内容:"; cat "$DEST/hvigor/hvigor-wrapper.properties" 2>/dev/null || true
+
+          echo "==== bootstrap 完成 ===="
+          ls -la "$DEST/hvigorw" "$DEST/hvigor/"
 
       - name: Build HAP (unsigned)
         working-directory: samples/${{ inputs.sample_dir }}
