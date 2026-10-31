@@ -223,6 +223,42 @@ jobs:
             echo "未找到 profile 或 API 未知，跳过"
           fi
 
+      - name: Bootstrap hvigorw (samples 不带启动器，从 SDK 模板补齐)
+        run: |
+          set -euo pipefail
+          DEST="samples/${{ inputs.sample_dir }}/ohos"
+          [ -d "$DEST" ] || { echo "::error::未找到 $DEST"; exit 1; }
+          echo "==== ohos 目录现状 ===="; ls -la "$DEST"
+
+          # 1) 启动器脚本：没有就写一个极简版（转发给 wrapper.js）
+          if [ ! -f "$DEST/hvigorw" ]; then
+            echo "hvigorw 缺失，写入最小启动器"
+            cat > "$DEST/hvigorw" <<'EOF'
+          #!/bin/sh
+          set -e
+          DIRNAME=$(cd "$(dirname "$0")" && pwd)
+          exec node "$DIRNAME/hvigor/hvigor-wrapper.js" "$@"
+          EOF
+            chmod +x "$DEST/hvigorw"
+          fi
+
+          # 2) hvigor 包装目录：工程若也没提交，从 flutter_tools 模板复制
+          if [ ! -f "$DEST/hvigor/hvigor-wrapper.js" ]; then
+            echo "hvigor/ 缺失，从 SDK 模板复制"
+            WRAP=$(find flutter_flutter/packages/flutter_tools/templates -type f -name 'hvigor-wrapper.js*' | head -1)
+            [ -n "$WRAP" ] || { echo "::error::模板中未找到 hvigor-wrapper.js"; \
+              find flutter_flutter/packages/flutter_tools/templates -iname '*hvigor*' -print; exit 1; }
+            TPL=$(dirname "$WRAP")
+            mkdir -p "$DEST/hvigor"
+            for f in "$TPL"/*; do
+              b=$(basename "$f"); cp "$f" "$DEST/hvigor/${b%.tmpl}"
+            done
+          fi
+
+          chmod +x "$DEST/hvigorw"
+          echo "==== bootstrap 后 ===="; ls -la "$DEST" "$DEST/hvigor"
+          echo "hvigor-wrapper.properties 内容:"; cat "$DEST/hvigor/hvigor-wrapper.properties" 2>/dev/null || true
+
       - name: Build HAP (unsigned)
         working-directory: samples/${{ inputs.sample_dir }}
         run: |
