@@ -40,23 +40,27 @@ jobs:
         run: |
           set -euo pipefail
           F=flutter_flutter/packages/flutter_tools/lib/src/ohos/ohos_sdk.dart
-          echo "==== 补丁前相关函数 ===="
-          grep -n "validApi1[01]SdkDirectory\|validSdkDirectory" "$F" || true
-          python3 - "$F" <<'EOF'
-          import re, sys
-          p = sys.argv[1]
-          s = open(p, encoding='utf-8').read()
-          total = 0
-          for fn in ('validApi10SdkDirectory', 'validApi11SdkDirectory'):
-              pat = re.compile(r'(static\s+bool\s+' + fn + r'\s*$$\s*String\s+\w+\s*$$\s*\{)')
-              s, n = pat.subn(r'\1\n    return true; // CI patch: bypass strict SDK dir check', s)
-              print(f'{fn}: patched {n} occurrence(s)')
-              total += n
-          if total == 0:
-              print('::error::补丁未命中，flutter_tools 源码结构可能变了')
-              sys.exit(1)
-          open(p, 'w', encoding='utf-8').write(s)
-          EOF
+          echo "==== 补丁前：所有 valid 校验函数 ===="
+          grep -n "static bool valid" "$F" || true
+
+          awk '
+            /static bool valid(SdkDirectory|Api1[01]SdkDirectory)/ {
+              print
+              print "    return true; // CI patch: bypass strict SDK dir check"
+              next
+            }
+            { print }
+          ' "$F" > "$F.tmp"
+          mv "$F.tmp" "$F"
+
+          echo "==== 补丁后：注入点 ===="
+          grep -n "CI patch" "$F" || true
+          COUNT=$(grep -c "CI patch" "$F" || true)
+          echo "注入数量: $COUNT (预期 4)"
+          if [ "$COUNT" -lt 4 ]; then
+            echo "::error::补丁未完整命中（预期 4 处校验函数：2x validSdkDirectory + 2x validApiXX）"
+            exit 1
+          fi
 
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: '17' }
