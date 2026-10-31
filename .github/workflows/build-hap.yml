@@ -10,6 +10,9 @@ on:
       samples_branch:
         description: 'samples 分支'
         default: 'master'
+      target_platform:
+        description: '目标架构：ohos-x64（DevEco 模拟器）/ ohos-arm64（真机）'
+        default: 'ohos-x64'
       flutter_ref:
         description: 'flutter_flutter 分支/标签'
         default: 'oh-3.41.9-release'
@@ -223,12 +226,39 @@ jobs:
       - name: Build HAP (unsigned)
         working-directory: samples/${{ inputs.sample_dir }}
         run: |
+          # 1) 工程自带 hvigorw 上 PATH（flutter_tools 调全局 hvigorw）
+          if [ -f ohos/hvigorw ]; then
+            chmod +x ohos/hvigorw || true
+            export PATH="$PWD/ohos:$PATH"
+            echo "使用工程自带 hvigorw: $PWD/ohos/hvigorw"
+          fi
+          # 2) 兜底：cwd 感知 shim（运行时在 $PWD 下找 hvigorw）
+          if ! command -v hvigorw >/dev/null 2>&1; then
+            echo "工程未带 ohos/hvigorw，安装兜底 shim"
+            mkdir -p $HOME/hvigor-shim
+            cat > $HOME/hvigor-shim/hvigorw <<'SH'
+          #!/usr/bin/env bash
+          for c in "$PWD/hvigorw" "$PWD/ohos/hvigorw"; do
+            [ -x "$c" ] && exec "$c" "$@"
+          done
+          echo "hvigorw shim: not found near $PWD" >&2
+          ls -la "$PWD" "$PWD/ohos" 2>/dev/null || true
+          exit 1
+          SH
+            chmod +x $HOME/hvigor-shim/hvigorw
+            export PATH="$HOME/hvigor-shim:$PATH"
+          fi
+
           echo "$GITHUB_WORKSPACE/flutter_flutter/bin" >> $GITHUB_PATH
           export PATH="$GITHUB_WORKSPACE/flutter_flutter/bin:$PATH"
+
+          echo "==== hvigorw 自检 ===="
+          command -v hvigorw && hvigorw --version || echo "::warning::hvigorw --version 失败但先继续（首次可能在拉取 hvigor 本体）"
+
           flutter --version
           flutter doctor -v || true
           flutter pub get
-          flutter build hap --release --no-codesign --target-platform ohos-arm64
+          flutter build hap --release --no-codesign --target-platform ${{ inputs.target_platform }}
 
       - name: Upload HAP
         uses: actions/upload-artifact@v4
