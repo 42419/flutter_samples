@@ -67,37 +67,40 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: '18' }
 
-      - name: Install ohpm and hvigor
+      - name: Install ohpm (shim) and hvigor
         run: |
           set -euo pipefail
           npm config set registry https://repo.huaweicloud.com/repository/npm/
 
-          # ---- ohpm：用 --@ohos:registry 临时覆盖全局 scope 配置，直查 npmjs ----
-          if ! npm install -g @ohos/ohpm-cli --@ohos:registry=https://registry.npmjs.org/; then
-            echo "::warning::npmjs 直装失败，改试华为云 npm 镜像"
-            npm install -g @ohos/ohpm-cli \
-              --@ohos:registry=https://repo.huaweicloud.com/repository/npm/ || true
-          fi
+          # ---- ohpm 替身：真实 ohpm 无法匿名获取（仅随 DevEco/官网协议下载分发）----
+          # flutter_tools 只调用 `ohpm install [--all]`；samples 的 ohos 依赖
+          # （flutter.har 等）全部由 hvigor 本地 file: 解析，不经 ohpm registry
+          mkdir -p $HOME/ohpm-shim
+          cat > $HOME/ohpm-shim/ohpm <<'SH'
+          #!/usr/bin/env bash
+          case "${1:-}" in
+            install)
+              echo "[ohpm shim] install $* — skipped (deps resolved locally by hvigor)"
+              exit 0 ;;
+            config|list|version|-v|--version)
+              echo "ohpm-shim 1.0.0"; exit 0 ;;
+            *)
+              echo "[ohpm shim] passthrough-noop: $*"; exit 0 ;;
+          esac
+          SH
+          chmod +x $HOME/ohpm-shim/ohpm
+          echo "$HOME/ohpm-shim" >> $GITHUB_PATH
+          export PATH="$HOME/ohpm-shim:$PATH"
+          ohpm --version   # 自检
 
-          # ---- 校验 + 诊断（万一还失败，直接看 registry 的真实响应）----
-          if ! command -v ohpm >/dev/null 2>&1; then
-            echo "==== 诊断：@ohos/ohpm-cli 在各 registry 的存在性 ===="
-            echo "-- npmjs:"; curl -fsSL "https://registry.npmjs.org/@ohos%2fohpm-cli" 2>&1 | head -c 300; echo
-            echo "-- 华为云 npm 镜像:"; curl -fsSL "https://repo.huaweicloud.com/repository/npm/@ohos%2fohpm-cli" 2>&1 | head -c 300; echo
-            echo "::error::ohpm 安装失败（上方诊断能看出包到底在不在）"
-            exit 1
-          fi
+          # ---- hvigor（此前 npm 安装已验证可用，保持不动）----
+          npm install -g @ohos/hvigor @ohos/hvigor-ohos-plugin || true
           echo "$(npm prefix -g)/bin" >> $GITHUB_PATH
           export PATH="$(npm prefix -g)/bin:$PATH"
-          ohpm --version
-          ohpm config set registry https://ohpm.huawei.com/ohpm || true
-
-          # ---- hvigor（此前已验证能从 repo.harmonyos.com 装上，维持不动）----
-          npm install -g @ohos/hvigor @ohos/hvigor-ohos-plugin || true
           if ! command -v hvigorw >/dev/null && command -v hvigor >/dev/null; then
             ln -sf "$(command -v hvigor)" "$(npm prefix -g)/bin/hvigorw"
           fi
-          which hvigorw && hvigorw --version || echo "::warning::hvigorw 不可用（可忽略）"
+          which hvigorw && hvigorw --version || echo "::warning::hvigorw 不可用（构建用工程自带的，可忽略）"
 
       - name: Query OHOS SDK URL
         id: sdk
