@@ -74,6 +74,10 @@ jobs:
         run: |
           set -euo pipefail
           npm config set registry https://repo.huaweicloud.com/repository/npm/
+          npm config set @ohos:registry https://repo.harmonyos.com/npm/
+          echo "==== npmrc 校验 ===="
+          npm config get registry
+          npm config get @ohos:registry
 
           # ---- ohpm 替身：真实 ohpm 无法匿名获取（仅随 DevEco/官网协议下载分发）----
           # flutter_tools 只调用 `ohpm install [--all]`；samples 的 ohos 依赖
