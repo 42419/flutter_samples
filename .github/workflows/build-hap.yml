@@ -300,6 +300,11 @@ jobs:
           flutter --version
           flutter doctor -v || true
           flutter pub get
+          
+          export CI=false
+          export npm_config_frozen_lockfile=false
+          export NPM_CONFIG_FROZEN_LOCKFILE=false
+          
           flutter build hap --release --no-codesign --target-platform ${{ inputs.target_platform }}
 
       - name: Upload HAP
