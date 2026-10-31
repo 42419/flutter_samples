@@ -218,49 +218,102 @@ jobs:
           echo "HDC_HOME=$OHOS/default/openharmony/toolchains" >> $GITHUB_ENV
           echo "$OHOS/default/openharmony/toolchains" >> $GITHUB_PATH
 
-      - name: 对齐 HarmonyOS SDK 版本配置
+      - name: 自动修复 HarmonyOS build-profile.json5
+        shell: bash
         run: |
           set -euo pipefail
 
           PROFILE="samples/${{ inputs.sample_dir }}/ohos/build-profile.json5"
           API="${OHOS_API:-}"
 
-          [ -f "$PROFILE" ] || {
-            echo "::error::找不到 $PROFILE"
+          if [ ! -f "$PROFILE" ]; then
+            echo "::error::找不到工程配置文件: $PROFILE"
             exit 1
-          }
+          fi
 
-          [ -n "$API" ] || {
+          if [ -z "$API" ]; then
             echo "::error::OHOS_API 未设置"
             exit 1
-          }
-
-          echo "当前 SDK API: $API"
-
-          echo "==== 修改前 ===="
-          cat "$PROFILE"
-
-          # 同步已有的 SDK 版本配置
-          sed -i -E \
-            's/("(compileSdkVersion|compatibleSdkVersion|targetSdkVersion)"[[:space:]]*:[[:space:]]*)("[^"]*"|[0-9]+([.][0-9]+)*)/\1'"$API"'/g' \
-            "$PROFILE"
-
-          echo "==== 修改后 ===="
-          cat "$PROFILE"
-
-          echo "==== SDK 配置检查 ===="
-
-          grep -nE 'compileSdkVersion|compatibleSdkVersion' "$PROFILE" || true
-
-          if ! grep -q '"compileSdkVersion"' "$PROFILE"; then
-            echo "::error::缺少 compileSdkVersion"
-            exit 1
           fi
 
-          if ! grep -q '"compatibleSdkVersion"' "$PROFILE"; then
-            echo "::error::缺少 compatibleSdkVersion"
-            exit 1
-          fi
+          SDK_VERSION="${API}.0.0"
+
+          echo "SDK API: $API"
+          echo "SDK Version: $SDK_VERSION"
+          echo "配置文件: $PROFILE"
+
+          # 创建独立 Python 环境，安装 JSON5 解析器
+          python3 -m venv "$RUNNER_TEMP/json5-env"
+          "$RUNNER_TEMP/json5-env/bin/pip" install json5
+
+          # 动态修改 JSON5
+          "$RUNNER_TEMP/json5-env/bin/python" - "$PROFILE" "$SDK_VERSION" <<'PY'
+          import json5
+          import sys
+
+          path = sys.argv[1]
+          sdk_version = sys.argv[2]
+
+          with open(path, "r", encoding="utf-8") as f:
+              config = json5.load(f)
+
+          app = config.get("app")
+          if not isinstance(app, dict):
+              raise SystemExit("错误：缺少 app 配置")
+
+          products = app.get("products")
+          if not isinstance(products, list) or not products:
+              raise SystemExit("错误：app.products 不存在或为空")
+
+          default_found = False
+
+          for product in products:
+              if not isinstance(product, dict):
+                  raise SystemExit("错误：发现无效的 Product 配置")
+
+              name = product.get("name")
+
+              if name == "default":
+                  default_found = True
+
+              # 使用当前安装的 SDK 作为编译版本
+              product["compileSdkVersion"] = sdk_version
+
+              # 不覆盖已有的最低兼容版本
+              if not product.get("compatibleSdkVersion"):
+                  product["compatibleSdkVersion"] = sdk_version
+
+              print(
+                  f"Product: {name}, "
+                  f"compileSdkVersion: {product['compileSdkVersion']}, "
+                  f"compatibleSdkVersion: {product['compatibleSdkVersion']}"
+              )
+
+          if not default_found:
+              raise SystemExit("错误：缺少 default Product，无法执行默认 HAP 构建")
+
+          with open(path, "w", encoding="utf-8") as f:
+              json5.dump(
+                  config,
+                  f,
+                  indent=2,
+                  ensure_ascii=False
+              )
+              f.write("\n")
+
+          # 重新读取，验证修改结果
+          with open(path, "r", encoding="utf-8") as f:
+              verified = json5.load(f)
+
+          for product in verified["app"]["products"]:
+              assert product.get("compileSdkVersion") == sdk_version
+              assert product.get("compatibleSdkVersion")
+
+          print("JSON5 配置修复及验证成功！")
+          PY
+
+          echo "==== 最终 build-profile.json5 ===="
+          cat "$PROFILE"
 
       - name: Bootstrap hvigorw (成套获取官方启动链)
         run: |
