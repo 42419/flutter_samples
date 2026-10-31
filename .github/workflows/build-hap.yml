@@ -18,6 +18,7 @@ on:
         default: 'oh-3.41.9-release'
 
 env:
+  NPM_CONFIG_FROZEN_LOCKFILE: "false"
   PUB_HOSTED_URL: https://pub.flutter-io.cn
   FLUTTER_STORAGE_BASE_URL: https://storage.flutter-io.cn
   FLUTTER_OHOS_STORAGE_BASE_URL: https://flutter-ohos.obs.cn-south-1.myhuaweicloud.com
@@ -75,6 +76,7 @@ jobs:
           set -euo pipefail
           npm config set registry https://repo.huaweicloud.com/repository/npm/
           npm config set @ohos:registry https://repo.harmonyos.com/npm/
+          echo "frozen-lockfile=false" >> $HOME/.npmrc
           echo "==== npmrc 校验 ===="
           npm config get registry
           npm config get @ohos:registry
