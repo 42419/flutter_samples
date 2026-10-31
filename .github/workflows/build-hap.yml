@@ -72,11 +72,24 @@ jobs:
           set -euo pipefail
           npm config set registry https://repo.huaweicloud.com/repository/npm/
           npm config set @ohos:registry https://repo.harmonyos.com/npm/
+
+          # ohpm 是硬依赖（flutter build hap 会直接调用），装不上就直接失败
+          npm install -g @ohos/ohpm-cli \
+            || npm install -g @ohos/ohpm \
+            || { echo "::error::ohpm 两个候选包名都装失败"; exit 1; }
+
+          # hvigor 兜底装（实际构建走工程自带的 hvigorw，这里只为消 doctor 警告）
           npm install -g @ohos/hvigor @ohos/hvigor-ohos-plugin || true
           if ! command -v hvigorw >/dev/null && command -v hvigor >/dev/null; then
             ln -sf "$(command -v hvigor)" "$(npm prefix -g)/bin/hvigorw"
           fi
-          which hvigorw && hvigorw --version || echo "::warning::hvigorw 不可用（构建优先用工程自带的，暂不影响）"
+
+          # 确保 npm 全局 bin 在 PATH 里（双保险）
+          echo "$(npm prefix -g)/bin" >> $GITHUB_PATH
+
+          echo "==== 工具自检 ===="
+          which ohpm && ohpm --version || { echo "::error::ohpm 仍不可用"; exit 1; }
+          which hvigorw && hvigorw --version || echo "::warning::hvigorw 不可用（构建用工程自带的，可忽略）"
 
       - name: Query OHOS SDK URL
         id: sdk
