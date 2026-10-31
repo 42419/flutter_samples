@@ -69,7 +69,7 @@ jobs:
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: '17' }
       - uses: actions/setup-node@v4
-        with: { node-version: '18' }
+        with: { node-version: '24.14.1' }
 
       - name: Install ohpm (shim) and hvigor
         run: |
@@ -314,6 +314,53 @@ jobs:
 
           echo "==== 最终 build-profile.json5 ===="
           cat "$PROFILE"
+
+      - name: 升级 HarmonyOS 构建工具配置
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT="samples/${{ inputs.sample_dir }}/ohos"
+
+          python3 - "$PROJECT" <<'PY'
+          import json5
+          import sys
+          from pathlib import Path
+
+          project = Path(sys.argv[1])
+
+          # 升级 Hvigor 及其 OHOS 插件
+          hvigor_file = project / "hvigor/hvigor-config.json5"
+
+          with hvigor_file.open("r", encoding="utf-8") as f:
+              config = json5.load(f)
+
+          config["hvigorVersion"] = "6.26.4"
+          config.setdefault("dependencies", {})[
+              "@ohos/hvigor-ohos-plugin"
+          ] = "6.26.4"
+
+          with hvigor_file.open("w", encoding="utf-8") as f:
+              json5.dump(config, f, indent=2, ensure_ascii=False)
+              f.write("\n")
+
+          # 升级项目开发态版本
+          package_file = project / "oh-package.json5"
+
+          with package_file.open("r", encoding="utf-8") as f:
+              package = json5.load(f)
+
+          package["modelVersion"] = "26.0.0"
+
+          with package_file.open("w", encoding="utf-8") as f:
+              json5.dump(package, f, indent=2, ensure_ascii=False)
+              f.write("\n")
+
+          print("Hvigor 配置升级完成")
+          print("hvigorVersion:", config["hvigorVersion"])
+          print("plugin:", config["dependencies"]["@ohos/hvigor-ohos-plugin"])
+          print("modelVersion:", package["modelVersion"])
+          PY
 
       - name: Bootstrap hvigorw (成套获取官方启动链)
         run: |
