@@ -218,15 +218,48 @@ jobs:
           echo "HDC_HOME=$OHOS/default/openharmony/toolchains" >> $GITHUB_ENV
           echo "$OHOS/default/openharmony/toolchains" >> $GITHUB_PATH
 
-      - name: 对齐示例 compileSdkVersion 到已装 SDK
+      - name: 对齐 HarmonyOS SDK 版本配置
         run: |
-          PROFILE=samples/${{ inputs.sample_dir }}/ohos/build-profile.json5
+          set -euo pipefail
+
+          PROFILE="samples/${{ inputs.sample_dir }}/ohos/build-profile.json5"
           API="${OHOS_API:-}"
-          if [ -f "$PROFILE" ] && [ -n "$API" ]; then
-            sed -i -E 's/"(compile|target)SdkVersion"[[:space:]]*:[[:space:]]*"[^"]*"/"\1SdkVersion": '"$API"'/g' "$PROFILE"
-            grep -n "SdkVersion" "$PROFILE" || true
-          else
-            echo "未找到 profile 或 API 未知，跳过"
+
+          [ -f "$PROFILE" ] || {
+            echo "::error::找不到 $PROFILE"
+            exit 1
+          }
+
+          [ -n "$API" ] || {
+            echo "::error::OHOS_API 未设置"
+            exit 1
+          }
+
+          echo "当前 SDK API: $API"
+
+          echo "==== 修改前 ===="
+          cat "$PROFILE"
+
+          # 同步已有的 SDK 版本配置
+          sed -i -E \
+            's/("(compileSdkVersion|compatibleSdkVersion|targetSdkVersion)"[[:space:]]*:[[:space:]]*)("[^"]*"|[0-9]+([.][0-9]+)*)/\1'"$API"'/g' \
+            "$PROFILE"
+
+          echo "==== 修改后 ===="
+          cat "$PROFILE"
+
+          echo "==== SDK 配置检查 ===="
+
+          grep -nE 'compileSdkVersion|compatibleSdkVersion' "$PROFILE" || true
+
+          if ! grep -q '"compileSdkVersion"' "$PROFILE"; then
+            echo "::error::缺少 compileSdkVersion"
+            exit 1
+          fi
+
+          if ! grep -q '"compatibleSdkVersion"' "$PROFILE"; then
+            echo "::error::缺少 compatibleSdkVersion"
+            exit 1
           fi
 
       - name: Bootstrap hvigorw (成套获取官方启动链)
