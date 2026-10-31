@@ -320,6 +320,9 @@ jobs:
         run: |
           set -euo pipefail
 
+          # 安装 JSON5 解析器
+          python3 -m pip install --user json5
+
           PROJECT="samples/${{ inputs.sample_dir }}/ohos"
 
           python3 - "$PROJECT" <<'PY'
@@ -329,7 +332,7 @@ jobs:
 
           project = Path(sys.argv[1])
 
-          # 升级 Hvigor 及其 OHOS 插件
+          # 升级 Hvigor 配置
           hvigor_file = project / "hvigor/hvigor-config.json5"
 
           with hvigor_file.open("r", encoding="utf-8") as f:
@@ -344,7 +347,7 @@ jobs:
               json5.dump(config, f, indent=2, ensure_ascii=False)
               f.write("\n")
 
-          # 升级项目开发态版本
+          # 升级项目 modelVersion
           package_file = project / "oh-package.json5"
 
           with package_file.open("r", encoding="utf-8") as f:
