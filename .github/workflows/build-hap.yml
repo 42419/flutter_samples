@@ -231,46 +231,56 @@ jobs:
           echo "==== ohos/hvigor 现状 ===="; ls -la "$DEST/hvigor" || true
           echo "---- hvigor-config.json5 ----"; cat "$DEST/hvigor/hvigor-config.json5" 2>/dev/null || echo "(无)"
 
-          # 1) 先全仓搜索已提交的 hvigor-wrapper.js（版本与 samples 生态匹配）
+          # 1) 优先全仓找成对的 wrapper（js + properties 同目录整体拷贝）
           WJS=$(find samples -type f -name 'hvigor-wrapper.js' | head -1)
           if [ -n "$WJS" ]; then
-            echo "本地找到: $WJS"
+            echo "本地找到: $WJS（连同目录文件整体复制）"
             mkdir -p "$DEST/hvigor"
-            cp "$WJS" "$DEST/hvigor/hvigor-wrapper.js"
-            # 同目录配套文件（properties 等）一并带上
-            for f in "$(dirname "$WJS")"/*; do
-              b=$(basename "$f")
-              [ "$b" = "hvigor-wrapper.js" ] && continue
-              cp "$f" "$DEST/hvigor/$b"
-            done
+            for f in "$(dirname "$WJS")"/*; do cp "$f" "$DEST/hvigor/"; done
           else
-            # 2) 全仓都没有 → 从 Gitee 官方示例仓拉（该目录下 hvigorw 已确认存在）
-            echo "仓内无 wrapper.js，从 Gitee 拉取"
+            # 2) 从 Gitee 拉成对文件（上次只拉了 js，这次补上 properties）
+            echo "仓内无 wrapper，从 Gitee 拉 js + properties"
+            BASE="https://gitee.com/southbridge/applications_app_samples/raw/master/code/SuperFeature/Widget/ArkTSCard/CanvasGame/hvigor"
             mkdir -p "$DEST/hvigor"
-            curl -fL --retry 2 -o "$DEST/hvigor/hvigor-wrapper.js" \
-              "https://gitee.com/southbridge/applications_app_samples/raw/master/code/SuperFeature/Widget/ArkTSCard/CanvasGame/hvigor/hvigor-wrapper.js" \
-              || { echo "::error::wrapper.js 拉取失败"; exit 1; }
+            curl -fL --retry 2 -o "$DEST/hvigor/hvigor-wrapper.js" "$BASE/hvigor-wrapper.js"
+            curl -fL --retry 2 -o "$DEST/hvigor/hvigor-wrapper.properties" "$BASE/hvigor-wrapper.properties" \
+              || echo "::warning::properties 拉取失败（下面探针会尝试重建）"
           fi
+          node --check "$DEST/hvigor/hvigor-wrapper.js" || { echo "::error::wrapper.js 非法"; exit 1; }
 
-          # 3) 语法校验：确保拿到的是 JS 而不是 404 页面
-          node --check "$DEST/hvigor/hvigor-wrapper.js" \
-            || { echo "::error::wrapper.js 语法校验失败（可能拉到了 HTML 错误页）"; head -5 "$DEST/hvigor/hvigor-wrapper.js"; exit 1; }
+          # 3) 版本对齐：按工程声明的 hvigor 版本，探测公开仓库的真实下载地址
+          HV=$(jq -r '.hvigorVersion // .modelVersion // empty' "$DEST/hvigor/hvigor-config.json5" 2>/dev/null || true)
+          echo "工程声明的 hvigor 版本: ${HV:-（未声明）}"
+          echo "---- 对齐前 properties ----"; cat "$DEST/hvigor/hvigor-wrapper.properties" 2>/dev/null || true
+          if [ -n "$HV" ]; then
+            PROPS="$DEST/hvigor/hvigor-wrapper.properties"
+            for U in \
+              "https://repo.harmonyos.com/hvigor/hvigor-${HV}-wrapper.jar" \
+              "https://repo.huaweicloud.com/harmonyos/hvigor/hvigor-${HV}.zip" \
+              "https://repo.huaweicloud.com/harmonyos/hvigor/hvigor-${HV}-wrapper.jar"; do
+              CODE=$(curl -s -o /dev/null -w '%{http_code}' -I --max-time 20 "$U" || echo 000)
+              echo "探针 $CODE  $U"
+              if [ "$CODE" = "200" ]; then
+                { grep -v '^distributionUrl=' "$PROPS" 2>/dev/null || true; \
+                  printf 'distributionUrl=https\\:%s\n' "${U#https:}"; } > "$PROPS.tmp"
+                mv "$PROPS.tmp" "$PROPS"
+                echo "已对齐 distributionUrl -> $U"
+                break
+              fi
+            done
+          fi
+          echo "---- 对齐后 properties ----"; cat "$DEST/hvigor/hvigor-wrapper.properties" 2>/dev/null || true
 
-          # 4) 写入 hvigorw 启动脚本（EOF 必须与 cat 同列顶格）
+          # 4) hvigorw 启动脚本
           cat > "$DEST/hvigorw" <<'EOF'
           #!/bin/sh
           HVIGOR_APP_HOME="`pwd -P`"
           WRAPPER="${HVIGOR_APP_HOME}/hvigor/hvigor-wrapper.js"
-          if [ ! -r "$WRAPPER" ]; then
-            echo "ERROR: hvigor/hvigor-wrapper.js not found in ${HVIGOR_APP_HOME}" >&2
-            exit 1
-          fi
+          [ -r "$WRAPPER" ] || { echo "ERROR: hvigor/hvigor-wrapper.js not found in ${HVIGOR_APP_HOME}" >&2; exit 1; }
           exec node "$WRAPPER" "$@"
           EOF
           chmod +x "$DEST/hvigorw"
-
-          echo "==== bootstrap 完成 ===="
-          ls -la "$DEST/hvigorw" "$DEST/hvigor/"
+          echo "==== bootstrap 完成 ===="; ls -la "$DEST/hvigorw" "$DEST/hvigor/"
 
       - name: Build HAP (unsigned)
         working-directory: samples/${{ inputs.sample_dir }}
