@@ -223,46 +223,38 @@ jobs:
             echo "未找到 profile 或 API 未知，跳过"
           fi
 
-      - name: Bootstrap hvigorw (补齐 samples 缺失的启动链)
+      - name: Bootstrap hvigorw (成套获取官方启动链)
         run: |
           set -euo pipefail
           DEST="samples/${{ inputs.sample_dir }}/ohos"
           [ -d "$DEST" ] || { echo "::error::未找到 $DEST"; exit 1; }
 
-          echo "==== 现状（失败时这段日志就是诊断依据）===="
+          echo "==== 工程原有 hvigor/ 内容（覆盖前留档）===="
           ls -la "$DEST/hvigor/" || true
-          for f in "$DEST/hvigor"/*; do echo "---- $f ----"; head -20 "$f" 2>/dev/null; done || true
+          for f in "$DEST/hvigor"/*; do
+            echo "---- $(basename "$f") ----"; head -30 "$f" 2>/dev/null
+          done || true
 
-          # 0) 先清掉之前可能生成的残缺/旧文件（hvigor-config.json5 保留——它声明工程插件版本）
-          rm -f "$DEST/hvigor/hvigor-wrapper.js" "$DEST/hvigor/hvigor-wrapper.properties"
-
-          # 1) 稀疏克隆官方示例仓，只取目标工程目录（js+properties 成套）
+          # 1) 稀疏克隆官方示例，取整套 hvigor 目录 + 启动器
           SRC_PROJ="code/SuperFeature/Widget/ArkTSCard/CanvasGame"
           rm -rf /tmp/asamples
           git clone --depth 1 --filter=blob:none --sparse \
             https://gitee.com/southbridge/applications_app_samples.git /tmp/asamples
           git -C /tmp/asamples sparse-checkout set "$SRC_PROJ"
-          ls -la "/tmp/asamples/$SRC_PROJ" "/tmp/asamples/$SRC_PROJ/hvigor"
+          echo "==== 官方工程 hvigor/ ===="; ls -la "/tmp/asamples/$SRC_PROJ/hvigor"
 
-          # 2) 成套复制：hvigorw 启动器 + hvigor/ 全部（不覆盖工程自己的 hvigor-config.json5）
+          # 2) 整套替换：hvigor/ 下【所有文件】一并复制（config+js 同源配套，不再挑文件）
+          mkdir -p "$DEST/hvigor"
+          cp "/tmp/asamples/$SRC_PROJ/hvigor"/* "$DEST/hvigor/"
           cp "/tmp/asamples/$SRC_PROJ/hvigorw" "$DEST/hvigorw"
           chmod +x "$DEST/hvigorw"
-          for f in "/tmp/asamples/$SRC_PROJ/hvigor"/*; do
-            b=$(basename "$f")
-            [ "$b" = "hvigor-config.json5" ] && continue
-            cp "$f" "$DEST/hvigor/$b"
-          done
 
-          # 3) 校验：js 合法 + properties 五个关键键齐全（不齐直接红，绝不带病继续）
+          # 3) 校验
           node --check "$DEST/hvigor/hvigor-wrapper.js"
-          PROPS="$DEST/hvigor/hvigor-wrapper.properties"
-          [ -f "$PROPS" ] || { echo "::error::hvigor-wrapper.properties 仍缺失"; exit 1; }
-          echo "==== 最终 properties ===="; cat "$PROPS"
-          MISSING=0
-          for k in distributionBase distributionPath zipStoreBase zipStorePath distributionUrl; do
-            grep -q "^$k=" "$PROPS" || { echo "::error::properties 缺键: $k"; MISSING=1; }
-          done
-          [ "$MISSING" = "0" ] || exit 1
+          CFG="$DEST/hvigor/hvigor-config.json5"
+          echo "==== 替换后 config ===="; cat "$CFG"
+          grep -qE '"(modelVersion|hvigorVersion)"' "$CFG" \
+            || { echo "::error::config 缺 modelVersion/hvigorVersion"; exit 1; }
 
           echo "==== bootstrap 完成 ===="
           ls -la "$DEST/hvigorw" "$DEST/hvigor/"
