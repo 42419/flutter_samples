@@ -17,8 +17,8 @@ on:
 env:
   PUB_HOSTED_URL: https://pub.flutter-io.cn
   FLUTTER_STORAGE_BASE_URL: https://storage.flutter-io.cn
-  FLUTTER_GIT_URL: https://gitcode.com/CPF-Flutter/flutter_flutter.git
   FLUTTER_OHOS_STORAGE_BASE_URL: https://flutter-ohos.obs.cn-south-1.myhuaweicloud.com
+  FLUTTER_GIT_URL: https://gitcode.com/CPF-Flutter/flutter_flutter.git
 
 jobs:
   build:
@@ -42,7 +42,22 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: '18' }
 
-      # ========== 3. 查询 SDK 最新下载地址 ==========
+      # ========== 3. ohpm & hvigor（npm 免登录）==========
+      - name: Install ohpm and hvigor via npm
+        run: |
+          set -euo pipefail
+          npm config set registry https://repo.huaweicloud.com/repository/npm/
+          npm config set @ohos:registry https://repo.harmonyos.com/npm/
+          npm install -g @ohos/hvigor @ohos/hvigor-ohos-plugin
+          npm install -g @ohos/ohpm || echo "::warning::@ohos/ohpm 安装失败，先继续"
+          if ! command -v hvigorw >/dev/null && command -v hvigor >/dev/null; then
+            ln -sf "$(command -v hvigor)" "$(npm prefix -g)/bin/hvigorw"
+          fi
+          echo "==== 工具自检 ===="
+          which hvigorw && hvigorw --version || true
+          which ohpm && ohpm --version || true
+
+      # ========== 4. 查询 SDK 最新下载地址 ==========
       - name: Query OHOS SDK URL
         id: sdk
         run: |
@@ -53,24 +68,13 @@ jobs:
               -H 'Accept: application/json, text/plain, */*' \
               -H 'Content-Type: application/json' \
               --data-raw '{
-                "projectName":"openharmony",
-                "branch":"master",
-                "pageNum":1,
-                "pageSize":10,
-                "deviceLevel":"",
-                "component":"'"${component}"'",
-                "type":1,
-                "startTime":"2025010100000000",
-                "endTime":"20990101235959",
-                "sortType":"",
-                "sortField":"",
-                "hardwareBoard":"",
-                "buildStatus":"success",
-                "buildFailReason":"",
-                "withDomain":1
+                "projectName":"openharmony","branch":"master","pageNum":1,"pageSize":10,
+                "deviceLevel":"","component":"'"${component}"'","type":1,
+                "startTime":"2025010100000000","endTime":"20990101235959",
+                "sortType":"","sortField":"","hardwareBoard":"","buildStatus":"success",
+                "buildFailReason":"","withDomain":1
               }'
           }
-
           query_component "ohos-sdk-public" > /tmp/pub.json
           URL=$(jq -r '.data.list.dataList[0].obsPath // empty' /tmp/pub.json)
           if [ -z "$URL" ]; then
@@ -78,15 +82,13 @@ jobs:
             URL=$(jq -r '.data.list.dataList[0].obsPath // empty' /tmp/full.json)
           fi
           [ -n "$URL" ] || { echo "::error::未能解析出 SDK 地址"; exit 1; }
-
-          # 从 URL 提取版本标识做缓存 key，如 OpenHarmony_7.1.0.22_20261030_180131
           VER=$(echo "$URL" | sed -E 's|.*/Daily_Version/||; s|/[^/]+$||; s|/|_|g')
           echo "url=$URL" >> $GITHUB_OUTPUT
           echo "ver=$VER" >> $GITHUB_OUTPUT
           echo "SDK URL : $URL"
           echo "CacheKey: ohos-sdk-$VER"
 
-      # ========== 4. SDK 缓存（命中则跳过 3.5G 下载）==========
+      # ========== 5. SDK tarball 缓存 + 下载 ==========
       - name: Cache OHOS SDK tarball
         id: sdk-cache
         uses: actions/cache@v4
@@ -102,7 +104,7 @@ jobs:
           curl -fL --retry 3 -A "Mozilla/5.0" -o .sdk-cache/ohos-sdk.tar.gz "${{ steps.sdk.outputs.url }}"
           ls -lh .sdk-cache/ohos-sdk.tar.gz
 
-      # ========== 5. 解压组装（自动探测目录结构）==========
+      # ========== 6. 解压组装（两种布局并存）==========
       - name: Assemble OHOS SDK
         run: |
           set -euo pipefail
@@ -127,37 +129,35 @@ jobs:
             [ -d "$d" ] || { echo "::error::缺少组件: $d"; exit 1; }
           done
 
-          # ---- 布局 A：DevEco 风格，给 hvigor（DEVECO_SDK_HOME）----
+          # ---- 布局 A：DevEco 风格（hvigor 用）----
           OHOS=$HOME/ohos-sdk
           mkdir -p $OHOS/default/openharmony
           mv native toolchains ets js $OHOS/default/openharmony/
 
-          # 读取 API 版本号（多种文件名都试，兜底 26）
           API=$(jq -r '.apiVersion // empty' $OHOS/default/openharmony/toolchains/oh-uni-package.json 2>/dev/null || true)
           [ -n "$API" ] || API=$(jq -r '.apiVersion // empty' $OHOS/default/openharmony/toolchains/package.json 2>/dev/null || true)
           [ -n "$API" ] || API=26
           echo "检测到 SDK API 版本: $API"
           echo "OHOS_API=$API" >> $GITHUB_ENV
 
-          # ---- 布局 B：flutter_tools 要的（HOS_SDK_HOME 根下放数字 API 目录）----
+          # ---- 布局 B：数字 API 目录（flutter_tools 的 HOS_SDK_HOME 找法）----
           HOS=$HOME/hos-sdk-root
           mkdir -p $HOS/$API
           for d in ets js native toolchains; do
-            ln -sfn $OHOS/default/openharmony/$d $HOS/$API/$d
+            cp -a $OHOS/default/openharmony/$d $HOS/$API/$d   # 用 cp -a 实拷，避免软链校验问题
           done
 
-          # DevEco 兼容软链（保持原样）
           mkdir -p $OHOS/openharmony && ln -sfn ../default/openharmony $OHOS/openharmony/$API
           for d in ets js native toolchains; do ln -sfn default/openharmony/$d $OHOS/$d; done
 
-          # ---- 环境变量：三种都导出，覆盖 flutter_tools 和 hvigor 的不同找法 ----
-          echo "DEVECO_SDK_HOME=$OHOS" >> $GITHUB_ENV     # hvigor 用
-          echo "HOS_SDK_HOME=$HOS" >> $GITHUB_ENV        # flutter_tools 用（本次报错的就是它）
-          echo "OHOS_SDK_HOME=$HOS" >> $GITHUB_ENV       # 老版 flutter_tools 用
+          # ---- 环境变量：三种全导出 ----
+          echo "HOS_SDK_HOME=$HOS" >> $GITHUB_ENV
+          echo "OHOS_SDK_HOME=$HOS" >> $GITHUB_ENV
+          echo "DEVECO_SDK_HOME=$OHOS" >> $GITHUB_ENV
           echo "HDC_HOME=$OHOS/default/openharmony/toolchains" >> $GITHUB_ENV
           echo "$OHOS/default/openharmony/toolchains" >> $GITHUB_PATH
 
-      # ========== 6. 对齐示例 compileSdkVersion ==========
+      # ========== 7. 对齐示例 compileSdkVersion ==========
       - name: 对齐示例 compileSdkVersion 到已装 SDK
         run: |
           PROFILE=samples/${{ inputs.sample_dir }}/ohos/build-profile.json5
@@ -170,30 +170,15 @@ jobs:
             echo "未找到 profile($PROFILE) 或 API 版本未知，跳过"
           fi
 
-      # ========== 7. Flutter 进 PATH ==========
-      - name: Add flutter to PATH
-        run: echo "$PWD/flutter_flutter/bin" >> $GITHUB_PATH
-
-      # ========== 7.5 安装 ohpm & hvigor（npm 免登录）==========
-      - name: Install ohpm and hvigor via npm
-        run: |
-          set -euo pipefail
-          npm config set registry https://repo.huaweicloud.com/repository/npm/
-          npm config set @ohos:registry https://repo.harmonyos.com/npm/
-          npm install -g @ohos/hvigor @ohos/hvigor-ohos-plugin
-          npm install -g @ohos/ohpm || echo "::warning::@ohos/ohpm 安装失败，先继续（构建可能不需要）"
-          # 兜底：如果 npm 包的 bin 叫 hvigor 而不是 hvigorw，做个软链
-          if ! command -v hvigorw >/dev/null && command -v hvigor >/dev/null; then
-            ln -sf "$(command -v hvigor)" "$(npm prefix -g)/bin/hvigorw"
-          fi
-          echo "==== 工具自检 ===="
-          which hvigorw && hvigorw --version || true
-          which ohpm && ohpm --version || true
-
       # ========== 8. 构建 ==========
       - name: Build HAP (unsigned)
         working-directory: samples/${{ inputs.sample_dir }}
         run: |
+          echo "==== SDK 布局自检 ===="
+          echo "HOS_SDK_HOME=$HOS_SDK_HOME"
+          ls -la "$HOS_SDK_HOME" "$HOS_SDK_HOME"/*/ 2>/dev/null | head -40 || true
+          echo "$PWD/../flutter_flutter/bin" >> $GITHUB_PATH
+          export PATH="$GITHUB_WORKSPACE/flutter_flutter/bin:$PATH"
           flutter --version
           flutter doctor -v || true
           flutter pub get
