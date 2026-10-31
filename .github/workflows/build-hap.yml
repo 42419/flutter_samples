@@ -369,6 +369,17 @@ jobs:
           print("modelVersion:", package["modelVersion"])
           PY
 
+      - name: 配置 HarmonyOS npm 仓库
+        shell: bash
+        run: |
+          cat > ~/.npmrc <<'EOF'
+          registry=https://repo.huaweicloud.com/repository/npm/
+          @ohos:registry=https://repo.harmonyos.com/npm/
+          EOF
+
+          npm config get registry
+          npm config get @ohos:registry
+
       - name: Bootstrap hvigorw (成套获取官方启动链)
         run: |
           set -euo pipefail
