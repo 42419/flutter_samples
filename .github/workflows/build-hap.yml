@@ -228,59 +228,44 @@ jobs:
           set -euo pipefail
           DEST="samples/${{ inputs.sample_dir }}/ohos"
           [ -d "$DEST" ] || { echo "::error::未找到 $DEST"; exit 1; }
-          echo "==== ohos/hvigor 现状 ===="; ls -la "$DEST/hvigor" || true
-          echo "---- hvigor-config.json5 ----"; cat "$DEST/hvigor/hvigor-config.json5" 2>/dev/null || echo "(无)"
 
-          # 1) 优先全仓找成对的 wrapper（js + properties 同目录整体拷贝）
-          WJS=$(find samples -type f -name 'hvigor-wrapper.js' | head -1)
-          if [ -n "$WJS" ]; then
-            echo "本地找到: $WJS（连同目录文件整体复制）"
-            mkdir -p "$DEST/hvigor"
-            for f in "$(dirname "$WJS")"/*; do cp "$f" "$DEST/hvigor/"; done
-          else
-            # 2) 从 Gitee 拉成对文件（上次只拉了 js，这次补上 properties）
-            echo "仓内无 wrapper，从 Gitee 拉 js + properties"
-            BASE="https://gitee.com/southbridge/applications_app_samples/raw/master/code/SuperFeature/Widget/ArkTSCard/CanvasGame/hvigor"
-            mkdir -p "$DEST/hvigor"
-            curl -fL --retry 2 -o "$DEST/hvigor/hvigor-wrapper.js" "$BASE/hvigor-wrapper.js"
-            curl -fL --retry 2 -o "$DEST/hvigor/hvigor-wrapper.properties" "$BASE/hvigor-wrapper.properties" \
-              || echo "::warning::properties 拉取失败（下面探针会尝试重建）"
-          fi
-          node --check "$DEST/hvigor/hvigor-wrapper.js" || { echo "::error::wrapper.js 非法"; exit 1; }
+          echo "==== 现状（失败时这段日志就是诊断依据）===="
+          ls -la "$DEST/hvigor/" || true
+          for f in "$DEST/hvigor"/*; do echo "---- $f ----"; head -20 "$f" 2>/dev/null; done || true
 
-          # 3) 版本对齐：按工程声明的 hvigor 版本，探测公开仓库的真实下载地址
-          HV=$(jq -r '.hvigorVersion // .modelVersion // empty' "$DEST/hvigor/hvigor-config.json5" 2>/dev/null || true)
-          echo "工程声明的 hvigor 版本: ${HV:-（未声明）}"
-          echo "---- 对齐前 properties ----"; cat "$DEST/hvigor/hvigor-wrapper.properties" 2>/dev/null || true
-          if [ -n "$HV" ]; then
-            PROPS="$DEST/hvigor/hvigor-wrapper.properties"
-            for U in \
-              "https://repo.harmonyos.com/hvigor/hvigor-${HV}-wrapper.jar" \
-              "https://repo.huaweicloud.com/harmonyos/hvigor/hvigor-${HV}.zip" \
-              "https://repo.huaweicloud.com/harmonyos/hvigor/hvigor-${HV}-wrapper.jar"; do
-              CODE=$(curl -s -o /dev/null -w '%{http_code}' -I --max-time 20 "$U" || echo 000)
-              echo "探针 $CODE  $U"
-              if [ "$CODE" = "200" ]; then
-                { grep -v '^distributionUrl=' "$PROPS" 2>/dev/null || true; \
-                  printf 'distributionUrl=https\\:%s\n' "${U#https:}"; } > "$PROPS.tmp"
-                mv "$PROPS.tmp" "$PROPS"
-                echo "已对齐 distributionUrl -> $U"
-                break
-              fi
-            done
-          fi
-          echo "---- 对齐后 properties ----"; cat "$DEST/hvigor/hvigor-wrapper.properties" 2>/dev/null || true
+          # 0) 先清掉之前可能生成的残缺/旧文件（hvigor-config.json5 保留——它声明工程插件版本）
+          rm -f "$DEST/hvigor/hvigor-wrapper.js" "$DEST/hvigor/hvigor-wrapper.properties"
 
-          # 4) hvigorw 启动脚本
-          cat > "$DEST/hvigorw" <<'EOF'
-          #!/bin/sh
-          HVIGOR_APP_HOME="`pwd -P`"
-          WRAPPER="${HVIGOR_APP_HOME}/hvigor/hvigor-wrapper.js"
-          [ -r "$WRAPPER" ] || { echo "ERROR: hvigor/hvigor-wrapper.js not found in ${HVIGOR_APP_HOME}" >&2; exit 1; }
-          exec node "$WRAPPER" "$@"
-          EOF
+          # 1) 稀疏克隆官方示例仓，只取目标工程目录（js+properties 成套）
+          SRC_PROJ="code/SuperFeature/Widget/ArkTSCard/CanvasGame"
+          rm -rf /tmp/asamples
+          git clone --depth 1 --filter=blob:none --sparse \
+            https://gitee.com/southbridge/applications_app_samples.git /tmp/asamples
+          git -C /tmp/asamples sparse-checkout set "$SRC_PROJ"
+          ls -la "/tmp/asamples/$SRC_PROJ" "/tmp/asamples/$SRC_PROJ/hvigor"
+
+          # 2) 成套复制：hvigorw 启动器 + hvigor/ 全部（不覆盖工程自己的 hvigor-config.json5）
+          cp "/tmp/asamples/$SRC_PROJ/hvigorw" "$DEST/hvigorw"
           chmod +x "$DEST/hvigorw"
-          echo "==== bootstrap 完成 ===="; ls -la "$DEST/hvigorw" "$DEST/hvigor/"
+          for f in "/tmp/asamples/$SRC_PROJ/hvigor"/*; do
+            b=$(basename "$f")
+            [ "$b" = "hvigor-config.json5" ] && continue
+            cp "$f" "$DEST/hvigor/$b"
+          done
+
+          # 3) 校验：js 合法 + properties 五个关键键齐全（不齐直接红，绝不带病继续）
+          node --check "$DEST/hvigor/hvigor-wrapper.js"
+          PROPS="$DEST/hvigor/hvigor-wrapper.properties"
+          [ -f "$PROPS" ] || { echo "::error::hvigor-wrapper.properties 仍缺失"; exit 1; }
+          echo "==== 最终 properties ===="; cat "$PROPS"
+          MISSING=0
+          for k in distributionBase distributionPath zipStoreBase zipStorePath distributionUrl; do
+            grep -q "^$k=" "$PROPS" || { echo "::error::properties 缺键: $k"; MISSING=1; }
+          done
+          [ "$MISSING" = "0" ] || exit 1
+
+          echo "==== bootstrap 完成 ===="
+          ls -la "$DEST/hvigorw" "$DEST/hvigor/"
 
       - name: Build HAP (unsigned)
         working-directory: samples/${{ inputs.sample_dir }}
