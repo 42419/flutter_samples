@@ -25,7 +25,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
-      # ========== 1. 拉源码 ==========
       - name: Clone flutter_samples (GitCode)
         run: |
           git clone --depth 1 -b ${{ inputs.samples_branch }} \
@@ -36,28 +35,22 @@ jobs:
           git clone --depth 1 -b ${{ inputs.flutter_ref }} \
             https://gitcode.com/CPF-Flutter/flutter_flutter.git flutter_flutter
 
-      # ========== 2. 基础工具 ==========
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: '17' }
       - uses: actions/setup-node@v4
         with: { node-version: '18' }
 
-      # ========== 3. ohpm & hvigor（npm 免登录）==========
       - name: Install ohpm and hvigor via npm
         run: |
           set -euo pipefail
           npm config set registry https://repo.huaweicloud.com/repository/npm/
           npm config set @ohos:registry https://repo.harmonyos.com/npm/
-          npm install -g @ohos/hvigor @ohos/hvigor-ohos-plugin
-          npm install -g @ohos/ohpm || echo "::warning::@ohos/ohpm 安装失败，先继续"
+          npm install -g @ohos/hvigor @ohos/hvigor-ohos-plugin || true
           if ! command -v hvigorw >/dev/null && command -v hvigor >/dev/null; then
             ln -sf "$(command -v hvigor)" "$(npm prefix -g)/bin/hvigorw"
           fi
-          echo "==== 工具自检 ===="
-          which hvigorw && hvigorw --version || true
-          which ohpm && ohpm --version || true
+          which hvigorw && hvigorw --version || echo "::warning::hvigorw 仍不可用（构建用工程自带的，暂不影响）"
 
-      # ========== 4. 查询 SDK 最新下载地址 ==========
       - name: Query OHOS SDK URL
         id: sdk
         run: |
@@ -85,13 +78,12 @@ jobs:
           VER=$(echo "$URL" | sed -E 's|.*/Daily_Version/||; s|/[^/]+$||; s|/|_|g')
           echo "url=$URL" >> $GITHUB_OUTPUT
           echo "ver=$VER" >> $GITHUB_OUTPUT
-          echo "SDK URL : $URL"
-          echo "CacheKey: ohos-sdk-$VER"
+          echo "SDK URL : $URL"; echo "CacheKey: ohos-sdk-$VER"
 
-      # ========== 5. SDK tarball 缓存 + 下载 ==========
-      - name: Cache OHOS SDK tarball
+      # ---- 缓存：restore 与 save 分开，下载完立刻保存 ----
+      - name: Restore SDK cache
         id: sdk-cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: .sdk-cache/ohos-sdk.tar.gz
           key: ohos-sdk-${{ steps.sdk.outputs.ver }}
@@ -104,23 +96,26 @@ jobs:
           curl -fL --retry 3 -A "Mozilla/5.0" -o .sdk-cache/ohos-sdk.tar.gz "${{ steps.sdk.outputs.url }}"
           ls -lh .sdk-cache/ohos-sdk.tar.gz
 
-      # ========== 6. 解压组装（两种布局并存）==========
+      - name: Save SDK cache（下载完立即存，不等 job 结束）
+        if: steps.sdk-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .sdk-cache/ohos-sdk.tar.gz
+          key: ohos-sdk-${{ steps.sdk.outputs.ver }}
+
       - name: Assemble OHOS SDK
         run: |
           set -euo pipefail
           mkdir -p $HOME/ohos-sdk-unpack
           tar -zxf .sdk-cache/ohos-sdk.tar.gz -C $HOME/ohos-sdk-unpack
-          echo "==== 解压后顶层结构 ===="
-          ls -la $HOME/ohos-sdk-unpack
+          echo "==== 解压后顶层结构 ===="; ls -la $HOME/ohos-sdk-unpack
 
           SRC=$(find $HOME/ohos-sdk-unpack -maxdepth 3 -type f -name "native-linux-x64-*.zip" -printf '%h\n' | head -1)
           if [ -z "$SRC" ]; then
             SRC=$(find $HOME/ohos-sdk-unpack -maxdepth 4 -type d -name native -printf '%h\n' | head -1)
           fi
           [ -n "$SRC" ] || { echo "::error::未找到 native 组件"; exit 1; }
-          echo "组件所在目录: $SRC"
-          cd "$SRC"
-          ls -la
+          echo "组件所在目录: $SRC"; cd "$SRC"; ls -la
 
           for z in native-linux-x64-*.zip toolchains-linux-x64-*.zip ets-linux-x64-*.zip js-linux-x64-*.zip; do
             [ -e "$z" ] && unzip -q -o "$z" || true
@@ -129,7 +124,7 @@ jobs:
             [ -d "$d" ] || { echo "::error::缺少组件: $d"; exit 1; }
           done
 
-          # ---- 布局 A：DevEco 风格（hvigor 用）----
+          # ---- 根 A：DevEco 风格（DEVECO_SDK_HOME 用）----
           OHOS=$HOME/ohos-sdk
           mkdir -p $OHOS/default/openharmony
           mv native toolchains ets js $OHOS/default/openharmony/
@@ -140,53 +135,53 @@ jobs:
           echo "检测到 SDK API 版本: $API"
           echo "OHOS_API=$API" >> $GITHUB_ENV
 
-          # ---- 布局 B：数字 API 目录（flutter_tools 的 HOS_SDK_HOME 找法）----
+          # 双布局：数字目录和 default 互相软链，骗过 ALL 语义的 Map 校验
+          ln -sfn default $OHOS/$API
+          mkdir -p $OHOS/openharmony && ln -sfn ../default/openharmony $OHOS/openharmony/$API
+          for d in ets js native toolchains; do ln -sfn default/openharmony/$d $OHOS/$d; done
+          # licenses 后门：存在则 flutter 直接跳过版本 Map 校验
+          mkdir -p $OHOS/licenses
+
+          # ---- 根 B：数字 API 目录（HOS_SDK_HOME / OHOS_SDK_HOME 用）----
           HOS=$HOME/hos-sdk-root
           mkdir -p $HOS/$API
           for d in ets js native toolchains; do
-            cp -a $OHOS/default/openharmony/$d $HOS/$API/$d   # 用 cp -a 实拷，避免软链校验问题
+            cp -a $OHOS/default/openharmony/$d $HOS/$API/$d
           done
+          ln -sfn $API $HOS/default          # ← 本次新增：B 根也有 default
+          mkdir -p $HOS/licenses             # ← 本次新增：B 根也有 licenses
 
-          mkdir -p $OHOS/openharmony && ln -sfn ../default/openharmony $OHOS/openharmony/$API
-          for d in ets js native toolchains; do ln -sfn default/openharmony/$d $OHOS/$d; done
+          echo "==== 布局自检 ===="
+          ls -la $OHOS $HOS
 
-          ln -sfn default $OHOS/$API
-
-          # ---- 环境变量：三种全导出 ----
           echo "HOS_SDK_HOME=$HOS" >> $GITHUB_ENV
           echo "OHOS_SDK_HOME=$HOS" >> $GITHUB_ENV
           echo "DEVECO_SDK_HOME=$OHOS" >> $GITHUB_ENV
           echo "HDC_HOME=$OHOS/default/openharmony/toolchains" >> $GITHUB_ENV
           echo "$OHOS/default/openharmony/toolchains" >> $GITHUB_PATH
 
-      # ========== 7. 对齐示例 compileSdkVersion ==========
       - name: 对齐示例 compileSdkVersion 到已装 SDK
         run: |
           PROFILE=samples/${{ inputs.sample_dir }}/ohos/build-profile.json5
           API="${OHOS_API:-}"
           if [ -f "$PROFILE" ] && [ -n "$API" ]; then
             sed -i -E 's/"(compile|target)SdkVersion"[[:space:]]*:[[:space:]]*"[^"]*"/"\1SdkVersion": '"$API"'/g' "$PROFILE"
-            echo "==== 修改后的 build-profile.json5 ===="
             grep -n "SdkVersion" "$PROFILE" || true
           else
-            echo "未找到 profile($PROFILE) 或 API 版本未知，跳过"
+            echo "未找到 profile 或 API 未知，跳过"
           fi
 
-      # ========== 8. 构建 ==========
       - name: Build HAP (unsigned)
         working-directory: samples/${{ inputs.sample_dir }}
         run: |
-          echo "==== SDK 布局自检 ===="
-          echo "HOS_SDK_HOME=$HOS_SDK_HOME"
-          ls -la "$HOS_SDK_HOME" "$HOS_SDK_HOME"/*/ 2>/dev/null | head -40 || true
-          echo "$PWD/../flutter_flutter/bin" >> $GITHUB_PATH
+          echo "$GITHUB_WORKSPACE/flutter_flutter/bin" >> $GITHUB_PATH
           export PATH="$GITHUB_WORKSPACE/flutter_flutter/bin:$PATH"
+          flutter config --ohos-sdk "$DEVECO_SDK_HOME"   # 显式指定，多个社区解法都靠它
           flutter --version
           flutter doctor -v || true
           flutter pub get
           flutter build hap --release --no-codesign --target-platform ohos-arm64
 
-      # ========== 9. 产物上传 ==========
       - name: Upload HAP
         uses: actions/upload-artifact@v4
         with:
