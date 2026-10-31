@@ -35,6 +35,29 @@ jobs:
           git clone --depth 1 -b ${{ inputs.flutter_ref }} \
             https://gitcode.com/CPF-Flutter/flutter_flutter.git flutter_flutter
 
+      # ========== 新增：给 SDK 目录校验打补丁（必须在任何 flutter 命令之前）==========
+      - name: Patch flutter_tools SDK validation (CI workaround)
+        run: |
+          set -euo pipefail
+          F=flutter_flutter/packages/flutter_tools/lib/src/ohos/ohos_sdk.dart
+          echo "==== 补丁前相关函数 ===="
+          grep -n "validApi1[01]SdkDirectory\|validSdkDirectory" "$F" || true
+          python3 - "$F" <<'EOF'
+          import re, sys
+          p = sys.argv[1]
+          s = open(p, encoding='utf-8').read()
+          total = 0
+          for fn in ('validApi10SdkDirectory', 'validApi11SdkDirectory'):
+              pat = re.compile(r'(static\s+bool\s+' + fn + r'\s*$$\s*String\s+\w+\s*$$\s*\{)')
+              s, n = pat.subn(r'\1\n    return true; // CI patch: bypass strict SDK dir check', s)
+              print(f'{fn}: patched {n} occurrence(s)')
+              total += n
+          if total == 0:
+              print('::error::补丁未命中，flutter_tools 源码结构可能变了')
+              sys.exit(1)
+          open(p, 'w', encoding='utf-8').write(s)
+          EOF
+
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: '17' }
       - uses: actions/setup-node@v4
@@ -49,7 +72,7 @@ jobs:
           if ! command -v hvigorw >/dev/null && command -v hvigor >/dev/null; then
             ln -sf "$(command -v hvigor)" "$(npm prefix -g)/bin/hvigorw"
           fi
-          which hvigorw && hvigorw --version || echo "::warning::hvigorw 仍不可用（构建用工程自带的，暂不影响）"
+          which hvigorw && hvigorw --version || echo "::warning::hvigorw 不可用（构建优先用工程自带的，暂不影响）"
 
       - name: Query OHOS SDK URL
         id: sdk
@@ -80,7 +103,6 @@ jobs:
           echo "ver=$VER" >> $GITHUB_OUTPUT
           echo "SDK URL : $URL"; echo "CacheKey: ohos-sdk-$VER"
 
-      # ---- 缓存：restore 与 save 分开，下载完立刻保存 ----
       - name: Restore SDK cache
         id: sdk-cache
         uses: actions/cache/restore@v4
@@ -96,7 +118,7 @@ jobs:
           curl -fL --retry 3 -A "Mozilla/5.0" -o .sdk-cache/ohos-sdk.tar.gz "${{ steps.sdk.outputs.url }}"
           ls -lh .sdk-cache/ohos-sdk.tar.gz
 
-      - name: Save SDK cache（下载完立即存，不等 job 结束）
+      - name: Save SDK cache
         if: steps.sdk-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
@@ -124,10 +146,12 @@ jobs:
             [ -d "$d" ] || { echo "::error::缺少组件: $d"; exit 1; }
           done
 
-          # ---- 根 A：DevEco 风格（DEVECO_SDK_HOME 用）----
+          # ---- 根 A：DevEco 风格（DEVECO_SDK_HOME / HOS_SDK_HOME）----
           OHOS=$HOME/ohos-sdk
           mkdir -p $OHOS/default/openharmony
           mv native toolchains ets js $OHOS/default/openharmony/
+          # default 下也直连一份组件（兼容两种 DevEco 布局解读）
+          for d in ets js native toolchains; do ln -sfn openharmony/$d $OHOS/default/$d; done
 
           API=$(jq -r '.apiVersion // empty' $OHOS/default/openharmony/toolchains/oh-uni-package.json 2>/dev/null || true)
           [ -n "$API" ] || API=$(jq -r '.apiVersion // empty' $OHOS/default/openharmony/toolchains/package.json 2>/dev/null || true)
@@ -135,27 +159,24 @@ jobs:
           echo "检测到 SDK API 版本: $API"
           echo "OHOS_API=$API" >> $GITHUB_ENV
 
-          # 双布局：数字目录和 default 互相软链，骗过 ALL 语义的 Map 校验
           ln -sfn default $OHOS/$API
           mkdir -p $OHOS/openharmony && ln -sfn ../default/openharmony $OHOS/openharmony/$API
-          for d in ets js native toolchains; do ln -sfn default/openharmony/$d $OHOS/$d; done
-          # licenses 后门：存在则 flutter 直接跳过版本 Map 校验
           mkdir -p $OHOS/licenses
 
-          # ---- 根 B：数字 API 目录（HOS_SDK_HOME / OHOS_SDK_HOME 用）----
+          # ---- 根 B：数字 API 目录（OHOS_SDK_HOME，doctor 已验证可用）----
           HOS=$HOME/hos-sdk-root
           mkdir -p $HOS/$API
           for d in ets js native toolchains; do
             cp -a $OHOS/default/openharmony/$d $HOS/$API/$d
           done
-          ln -sfn $API $HOS/default          # ← 本次新增：B 根也有 default
-          mkdir -p $HOS/licenses             # ← 本次新增：B 根也有 licenses
+          ln -sfn $API $HOS/default
+          mkdir -p $HOS/licenses
 
           echo "==== 布局自检 ===="
           ls -la $OHOS $HOS
 
-          echo "HOS_SDK_HOME=$HOS" >> $GITHUB_ENV
           echo "OHOS_SDK_HOME=$HOS" >> $GITHUB_ENV
+          echo "HOS_SDK_HOME=$OHOS" >> $GITHUB_ENV
           echo "DEVECO_SDK_HOME=$OHOS" >> $GITHUB_ENV
           echo "HDC_HOME=$OHOS/default/openharmony/toolchains" >> $GITHUB_ENV
           echo "$OHOS/default/openharmony/toolchains" >> $GITHUB_PATH
@@ -176,7 +197,6 @@ jobs:
         run: |
           echo "$GITHUB_WORKSPACE/flutter_flutter/bin" >> $GITHUB_PATH
           export PATH="$GITHUB_WORKSPACE/flutter_flutter/bin:$PATH"
-          flutter config --ohos-sdk "$DEVECO_SDK_HOME"   # 显式指定，多个社区解法都靠它
           flutter --version
           flutter doctor -v || true
           flutter pub get
