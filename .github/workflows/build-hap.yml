@@ -67,30 +67,41 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: '18' }
 
-      - name: Install ohpm and hvigor via npm
+      - name: Install ohpm and hvigor
         run: |
           set -euo pipefail
-          # npm 全局镜像（给 hvigor 用）
           npm config set registry https://repo.huaweicloud.com/repository/npm/
 
-          # ---- ohpm：从 OpenHarmony 专用 npm 仓库装（不带 @ohos scope）----
-          OHPM_REG=https://repo.huaweicloud.com/openharmony/npm/
-          if ! npm install -g ohpm-cli --registry=$OHPM_REG; then
-            echo "::warning::固定 registry 安装失败，改为动态解析最新 tgz"
-            TGZ=$(curl -fsSL ${OHPM_REG}ohpm-cli | jq -r '.versions[."dist-tags.latest"].dist.tarball')
-            [ -n "$TGZ" ] && [ "$TGZ" != "null" ] || { echo "::error::无法解析 ohpm-cli 下载地址"; exit 1; }
-            npm install -g "$TGZ"
+          # ---- ohpm 方案一：官方安装脚本（CI 流水线验证过）----
+          curl -fsSL https://ohpm.openharmony.cn/ohpm/install.sh -o /tmp/ohpm-install.sh \
+            && bash /tmp/ohpm-install.sh || echo "::warning::install.sh 失败，转直连 tgz"
+
+          # 安装位置探测（脚本可能装到 ~/ohpm 或其他位置）
+          OHPM_BIN=$(find $HOME -maxdepth 5 -type f -name ohpm -path '*/bin/*' 2>/dev/null | head -1)
+
+          # ---- ohpm 方案二：直连 tgz 兜底 ----
+          if [ -z "$OHPM_BIN" ]; then
+            echo "::warning::未找到 ohpm，改为直接下载 tgz"
+            mkdir -p $HOME/ohpm-cli && cd $HOME/ohpm-cli
+            curl -fL --retry 3 -o ohpm.tgz \
+              "https://repo.huaweicloud.com/openharmony/npm/ohpm-cli/-/ohpm-cli-2.0.1.tgz"
+            tar -xzf ohpm.tgz
+            # 包内结构通常为 package/ 或 ohpm/，找到 bin/init 执行初始化
+            INIT=$(find $HOME/ohpm-cli -type f -name init -path '*/bin/*' | head -1)
+            [ -n "$INIT" ] && (cd "$(dirname "$INIT")" && ./init || true)
+            OHPM_BIN=$(find $HOME/ohpm-cli -type f -name ohpm -path '*/bin/*' | head -1)
           fi
 
-          echo "$(npm prefix -g)/bin" >> $GITHUB_PATH
-          export PATH="$(npm prefix -g)/bin:$PATH"
-          which ohpm && ohpm --version || { echo "::error::ohpm 安装后仍不可用"; exit 1; }
-
-          # ohpm 源切到华为镜像，保证后续 ohpm install 拉依赖顺畅
+          [ -n "$OHPM_BIN" ] || { echo "::error::ohpm 两条路都装失败"; exit 1; }
+          echo "$(dirname "$OHPM_BIN")" >> $GITHUB_PATH
+          export PATH="$(dirname "$OHPM_BIN"):$PATH"
+          ohpm --version || { echo "::error::ohpm 存在但无法运行"; exit 1; }
           ohpm config set registry https://ohpm.huawei.com/ohpm || true
 
           # ---- hvigor 兜底（构建实际用工程自带 hvigorw）----
           npm install -g @ohos/hvigor @ohos/hvigor-ohos-plugin || true
+          echo "$(npm prefix -g)/bin" >> $GITHUB_PATH
+          export PATH="$(npm prefix -g)/bin:$PATH"
           if ! command -v hvigorw >/dev/null && command -v hvigor >/dev/null; then
             ln -sf "$(command -v hvigor)" "$(npm prefix -g)/bin/hvigorw"
           fi
