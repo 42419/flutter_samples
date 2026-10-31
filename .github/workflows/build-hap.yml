@@ -351,27 +351,37 @@ jobs:
           echo "==== bootstrap 完成 ===="
           ls -la "$DEST/hvigorw" "$DEST/hvigor/"
 
-      - name: 诊断 HarmonyOS SDK 和 Hvigor 版本
+      - name: 检查 Hvigor 版本锁定配置
         shell: bash
         run: |
-          echo "===== SDK 环境 ====="
-          echo "OHOS_SDK_HOME=$OHOS_SDK_HOME"
-          echo "OHOS_API=$OHOS_API"
-
-          echo "===== 项目 Hvigor 配置 ====="
           cd "samples/${{ inputs.sample_dir }}/ohos"
 
-          for file in oh-package.json5 entry/oh-package.json5 build-profile.json5; do
+          echo "===== Node ====="
+          node -v
+
+          echo "===== ohpm ====="
+          ohpm -v || true
+
+          echo "===== Hvigor ====="
+          ./hvigorw --version || true
+
+          for file in \
+            hvigor/hvigor-config.json5 \
+            oh-package-lock.json5 \
+            hvigorfile.ts \
+            hvigorfile.js
+          do
             if [ -f "$file" ]; then
               echo "===== $file ====="
               cat "$file"
             fi
           done
 
-          echo "===== SDK 版本文件 ====="
-          find "$OHOS_SDK_HOME" -maxdepth 4 \
-            \( -iname '*version*' -o -iname 'source.properties' \) \
-            -type f 2>/dev/null | head -30
+          echo "===== Hvigor 版本引用 ====="
+          grep -R -n -E \
+            '"@ohos/hvigor"|"@ohos/hvigor-ohos-plugin"|3\.0\.2' \
+            --include='*.json5' --include='*.yaml' --include='*.yml' . \
+            | head -100 || true
 
       - name: Build HAP (unsigned)
         working-directory: samples/${{ inputs.sample_dir }}
