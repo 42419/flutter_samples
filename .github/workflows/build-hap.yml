@@ -342,6 +342,10 @@ jobs:
           config.setdefault("dependencies", {})[
               "@ohos/hvigor-ohos-plugin"
           ] = "6.26.4"
+          # 强制 Hvigor 使用 npm，绕过旧版 pnpm 7.30.0
+          config.setdefault("properties", {})[
+              "hvigor.dependency.useNpm"
+          ] = True
 
           with hvigor_file.open("w", encoding="utf-8") as f:
               json5.dump(config, f, indent=2, ensure_ascii=False)
