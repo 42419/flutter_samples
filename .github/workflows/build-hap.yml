@@ -661,37 +661,32 @@ jobs:
         run: |
           set -euo pipefail
 
-          PROJECT="samples/${{ inputs.sample_dir }}"
-          OHOS_PROJECT="$PROJECT/ohos"
+          PROJECT="samples/${{ inputs.sample_dir }}/ohos"
 
           echo "===== 工程目录 ====="
+          cd "$PROJECT"
           pwd
-          ls -la "$OHOS_PROJECT"
+          ls -la
 
           echo "===== Hvigor 配置文件 ====="
-          find "$OHOS_PROJECT" -maxdepth 3 \
+          find hvigor -maxdepth 2 \
             -name 'hvigor-config.json5' -print
 
-          echo "===== 检查配置文件 ====="
-          test -f "$OHOS_PROJECT/ohos/hvigor/hvigor-config.json5" && \
-            echo "错误：意外的嵌套目录" || true
-
-          test -f "$OHOS_PROJECT/hvigor/hvigor-config.json5" || {
-            echo "::error::ohos/hvigor/hvigor-config.json5 不存在"
+          test -f hvigor/hvigor-config.json5 || {
+            echo "::error::Hvigor 配置文件不存在"
             exit 1
           }
 
           echo "===== 启动器内容 ====="
-          sed -n '1,200p' "$OHOS_PROJECT/ohos/hvigorw"
+          sed -n '1,200p' hvigorw
 
-          echo "===== Hvigor Wrapper 内容 ====="
-          if [ -f "$OHOS_PROJECT/ohos/hvigor/hvigor-wrapper.js" ]; then
-            sed -n '1,240p' \
-              "$OHOS_PROJECT/ohos/hvigor/hvigor-wrapper.js"
+          echo "===== Wrapper 内容 ====="
+          if [ -f hvigor/hvigor-wrapper.js ]; then
+            sed -n '1,240p' hvigor/hvigor-wrapper.js
           fi
 
           echo "===== Hvigor 配置 ====="
-          cat "$OHOS_PROJECT/ohos/hvigor/hvigor-config.json5"
+          cat hvigor/hvigor-config.json5
 
           echo "===== Node ====="
           node --version
