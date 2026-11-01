@@ -618,21 +618,39 @@ jobs:
           set -euo pipefail
 
           PROJECT="samples/${{ inputs.sample_dir }}/ohos"
-
           cd "$PROJECT"
 
           echo "===== Hvigor 配置 ====="
           cat hvigor/hvigor-config.json5
 
-          echo "===== 检查 Hvigor 版本 ====="
+          echo "===== 检查 Hvigor 配置 ====="
 
-          grep -q '"hvigorVersion": "6.26.9"' \
-            hvigor/hvigor-config.json5
+          "$RUNNER_TEMP/json5-env/bin/python" <<'PY'
+          import json5
 
-          grep -q '"@ohos/hvigor-ohos-plugin": "6.26.9"' \
-            hvigor/hvigor-config.json5
+          path = "hvigor/hvigor-config.json5"
 
-          echo "Hvigor 配置检查通过"
+          with open(path, encoding="utf-8") as f:
+              config = json5.load(f)
+
+          expected_version = "6.26.9"
+
+          actual_version = config.get("hvigorVersion")
+          actual_plugin = config.get("dependencies", {}).get(
+              "@ohos/hvigor-ohos-plugin"
+          )
+
+          print("Hvigor:", actual_version)
+          print("Plugin:", actual_plugin)
+
+          if actual_version != expected_version:
+              raise SystemExit("Hvigor 版本不匹配")
+
+          if actual_plugin != expected_version:
+              raise SystemExit("Hvigor 插件版本不匹配")
+
+          print("Hvigor 配置检查通过")
+          PY
 
       # ============================================================
       # 10. 检查启动器及依赖解析
@@ -746,13 +764,18 @@ jobs:
 
           echo "========== Hvigor log files =========="
 
+          if [ ! -d "$HOME/.hvigor" ]; then
+            echo "Hvigor 日志目录不存在：$HOME/.hvigor"
+            exit 0
+          fi
+
           find "$HOME/.hvigor" \
             -path '*/node_modules' -prune -o \
             -type f \( -name '*.log' -o -name 'hvigor*.txt' \) \
             -mmin -30 -print 2>/dev/null |
           while read -r file; do
             echo "========== $file =========="
-            tail -n 150 "$file"
+            tail -n 150 "$file" || true
           done
 
       # ============================================================
