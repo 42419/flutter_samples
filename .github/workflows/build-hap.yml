@@ -4,18 +4,18 @@ on:
   workflow_dispatch:
     inputs:
       sample_dir:
-        description: '示例目录名，如 flutter_music_player / channel_demo'
+        description: "示例目录名，如 flutter_music_player / channel_demo"
         required: true
-        default: 'flutter_music_player'
+        default: "flutter_music_player"
       samples_branch:
-        description: 'samples 分支'
-        default: 'master'
+        description: "samples 分支"
+        default: "master"
       target_platform:
-        description: '目标架构：ohos-x64（DevEco 模拟器）/ ohos-arm64（真机）'
-        default: 'ohos-x64'
+        description: "目标架构：ohos-x64（DevEco 模拟器）/ ohos-arm64（真机）"
+        default: "ohos-x64"
       flutter_ref:
-        description: 'flutter_flutter 分支/标签'
-        default: 'oh-3.41.9-release'
+        description: "flutter_flutter 分支/标签"
+        default: "oh-3.41.9-release"
 
 env:
   NPM_CONFIG_FROZEN_LOCKFILE: "false"
@@ -67,9 +67,10 @@ jobs:
           fi
 
       - uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: '17' }
+        with: { distribution: temurin, java-version: "17" }
       - uses: actions/setup-node@v4
-        with: { node-version: '24.14.1' }
+        with:
+          node-version: "24.14.1"
 
       - name: Install ohpm (shim) and hvigor
         run: |
@@ -405,6 +406,33 @@ jobs:
           cp "/tmp/asamples/$SRC_PROJ/hvigor"/* "$DEST/hvigor/"
           cp "/tmp/asamples/$SRC_PROJ/hvigorw" "$DEST/hvigorw"
           chmod +x "$DEST/hvigorw"
+          # 修改启动器使用的 pnpm 版本，避免 pnpm 7 与 Node 24 不兼容
+          echo "==== 检查 pnpm 版本配置 ===="
+
+          grep -n -E 'pnpm|7\.30\.0' \
+            "$DEST/hvigor/hvigor-wrapper.js" \
+            "$DEST/hvigorw" || true
+
+          # 将旧版 pnpm 替换为兼容 Node 24 的版本
+            FOUND=0
+
+            for f in "$DEST/hvigor/hvigor-wrapper.js" "$DEST/hvigorw"; do
+              if [ -f "$f" ] && grep -q '7\.30\.0' "$f"; then
+                sed -i 's/7\.30\.0/9.15.9/g' "$f"
+                FOUND=1
+              fi
+            done
+
+            if [ "$FOUND" -ne 1 ]; then
+              echo "::error::没有在启动器中找到 pnpm 7.30.0，请检查实际引用位置"
+              grep -R -n '7\.30\.0' "$DEST/hvigor" "$DEST/hvigorw" || true
+              exit 1
+            fi
+
+            echo "==== 修改后的 pnpm 配置 ===="
+            grep -n -E 'pnpm|9\.15\.9' \
+              "$DEST/hvigor/hvigor-wrapper.js" \
+              "$DEST/hvigorw" || true
 
           # 3) 校验
           node --check "$DEST/hvigor/hvigor-wrapper.js"
@@ -448,6 +476,71 @@ jobs:
             --include='*.json5' --include='*.yaml' --include='*.yml' . \
             | head -100 || true
 
+      - name: 更新 HarmonyOS 项目构建配置
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 -m venv "$RUNNER_TEMP/json5-env"
+          "$RUNNER_TEMP/json5-env/bin/pip" install json5
+
+          PROJECT="samples/${{ inputs.sample_dir }}/ohos"
+
+          "$RUNNER_TEMP/json5-env/bin/python" - "$PROJECT" <<'PY'
+          import json5
+          import sys
+          from pathlib import Path
+
+          project = Path(sys.argv[1])
+
+          # Hvigor 配置
+          config_file = project / "hvigor/hvigor-config.json5"
+
+          with config_file.open(encoding="utf-8") as f:
+              config = json5.load(f)
+
+          config["hvigorVersion"] = "6.26.9"
+          config.setdefault("dependencies", {})[
+              "@ohos/hvigor-ohos-plugin"
+          ] = "6.26.9"
+
+          with config_file.open("w", encoding="utf-8") as f:
+              json5.dump(config, f, indent=2)
+              f.write("\n")
+
+          # 项目版本
+          package_file = project / "oh-package.json5"
+
+          with package_file.open(encoding="utf-8") as f:
+              package = json5.load(f)
+
+          package["modelVersion"] = "26.0.0"
+
+          with package_file.open("w", encoding="utf-8") as f:
+              json5.dump(package, f, indent=2)
+              f.write("\n")
+
+          # 编译 SDK 版本
+          profile_file = project / "build-profile.json5"
+
+          with profile_file.open(encoding="utf-8") as f:
+              profile = json5.load(f)
+
+          products = profile["app"]["products"]
+
+          for product in products:
+              product["compileSdkVersion"] = "26.0.0"
+
+          with profile_file.open("w", encoding="utf-8") as f:
+              json5.dump(profile, f, indent=2)
+              f.write("\n")
+
+          print("Hvigor:", config["hvigorVersion"])
+          print("Plugin:", config["dependencies"]["@ohos/hvigor-ohos-plugin"])
+          print("Model:", package["modelVersion"])
+          print("Compile SDK: 26.0.0")
+          PY
+
       - name: Build HAP (unsigned)
         working-directory: samples/${{ inputs.sample_dir }}
         run: |
@@ -483,11 +576,11 @@ jobs:
           flutter --version
           flutter doctor -v || true
           flutter pub get
-          
+
           export CI=false
           export npm_config_frozen_lockfile=false
           export NPM_CONFIG_FROZEN_LOCKFILE=false
-          
+
           flutter build hap --release --no-codesign --target-platform ${{ inputs.target_platform }}
 
       - name: Upload HAP
