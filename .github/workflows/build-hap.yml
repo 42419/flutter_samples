@@ -583,6 +583,24 @@ jobs:
 
           flutter build hap --release --no-codesign --target-platform ${{ inputs.target_platform }} -v
 
+      - name: Collect Hvigor Logs
+        if: always()
+        run: |
+          echo "========== Hvigor version =========="
+          node --version
+          find "$HOME/.hvigor" -type f \
+            \( -name "*.log" -o -name "*.txt" \) \
+            -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -20
+
+          echo "========== Recent Hvigor logs =========="
+          find "$HOME/.hvigor" -type f \
+            \( -name "*.log" -o -name "*.txt" \) \
+            -mmin -30 -print 2>/dev/null |
+          while read -r file; do
+            echo "========== $file =========="
+            tail -n 200 "$file"
+          done
+
       - name: Upload HAP
         uses: actions/upload-artifact@v4
         with:
