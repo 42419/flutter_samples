@@ -581,7 +581,7 @@ jobs:
           export npm_config_frozen_lockfile=false
           export NPM_CONFIG_FROZEN_LOCKFILE=false
 
-          flutter build hap --release --no-codesign --target-platform ${{ inputs.target_platform }}
+          flutter build hap --release --no-codesign --target-platform ${{ inputs.target_platform }} -v
 
       - name: Upload HAP
         uses: actions/upload-artifact@v4
