@@ -444,6 +444,25 @@ jobs:
           echo "==== bootstrap 完成 ===="
           ls -la "$DEST/hvigorw" "$DEST/hvigor/"
 
+      - name: Upgrade Hvigor
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CONFIG="samples/flutter_music_player/ohos/hvigor/hvigor-config.json5"
+
+          if [ ! -f "$CONFIG" ]; then
+            echo "::error::找不到 $CONFIG"
+            exit 1
+          fi
+
+          sed -i \
+            -e 's/"hvigorVersion": "3.0.2"/"hvigorVersion": "6.26.9"/' \
+            -e 's/"@ohos\/hvigor-ohos-plugin": "3.0.2"/"@ohos\/hvigor-ohos-plugin": "6.26.9"/' \
+            "$CONFIG"
+
+          cat "$CONFIG"
+
       - name: 检查 Hvigor 版本锁定配置
         shell: bash
         run: |
@@ -540,6 +559,16 @@ jobs:
           print("Model:", package["modelVersion"])
           print("Compile SDK: 26.0.0")
           PY
+
+      - name: Verify Hvigor
+        run: |
+          cd samples/flutter_music_player/ohos
+
+          echo "===== Hvigor 配置 ====="
+          cat hvigor/hvigor-config.json5
+
+          echo "===== Hvigor 实际版本 ====="
+          ./hvigorw --version
 
       - name: Build HAP (unsigned)
         working-directory: samples/${{ inputs.sample_dir }}
