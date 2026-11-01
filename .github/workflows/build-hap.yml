@@ -103,6 +103,7 @@ jobs:
       #    需要先把 zip 上传到本仓库（私有）的 Release
       # ============================================================
 
+
       - name: Install Command Line Tools
         shell: bash
         env:
@@ -110,13 +111,72 @@ jobs:
         run: |
           set -euo pipefail
 
+          echo "==== 下载 CLT ZIP 分卷 ===="
+
           gh release download "${{ inputs.clt_release_tag }}" \
             --repo "${{ github.repository }}" \
-            --pattern 'commandline-tools-linux-x64-*.zip' \
+            --pattern 'commandline-tools-linux-x64-*.zip.*' \
             --dir "$RUNNER_TEMP"
 
+          echo "==== 检查分卷 ===="
+
+          mapfile -t PARTS < <(
+            find "$RUNNER_TEMP" \
+              -maxdepth 1 \
+              -type f \
+              -name 'commandline-tools-linux-x64-*.zip.[0-9][0-9][0-9]' \
+              | sort -V
+          )
+
+          if [ "${#PARTS[@]}" -eq 0 ]; then
+            echo "::error::没有找到 CLT ZIP 分卷"
+            ls -lh "$RUNNER_TEMP"
+            exit 1
+          fi
+
+          printf '%s\n' "${PARTS[@]}"
+
+          # 检查首个分卷
+          FIRST="${PARTS[0]}"
+
+          if [[ ! "$FIRST" =~ \.001$ ]]; then
+            echo "::error::第一个分卷不是 .001"
+            exit 1
+          fi
+
+          ZIP="${FIRST%.001}"
+
+          # 检查分卷是否连续
+          for i in "${!PARTS[@]}"; do
+            EXPECTED="${ZIP}.$(printf '%03d' "$((i + 1))")"
+
+            if [ "${PARTS[$i]}" != "$EXPECTED" ]; then
+              echo "::error::分卷缺失或顺序错误: $EXPECTED"
+              exit 1
+            fi
+          done
+
+          echo "分卷数量: ${#PARTS[@]}"
+
+          # 合并 ZIP
+          echo "==== 合并 ZIP ===="
+
+          cat "${PARTS[@]}" > "$ZIP"
+
+          ls -lh "$ZIP"
+
+          # 检查 ZIP 完整性
+          echo "==== 验证 ZIP ===="
+
+          unzip -tq "$ZIP"
+
+          echo "ZIP 验证成功"
+
+          # 解压 CLT
+          echo "==== 解压 Command Line Tools ===="
+
           mkdir -p "$HOME/clt"
-          unzip -q "$RUNNER_TEMP"/commandline-tools-linux-x64-*.zip -d "$HOME/clt"
+          unzip -q "$ZIP" -d "$HOME/clt"
 
           CLT="$HOME/clt/command-line-tools"
 
@@ -141,8 +201,10 @@ jobs:
 
           echo "==== CLT 目录 ===="
           ls -la "$CLT"
+
           echo "==== CLT/bin ===="
           ls -la "$CLT/bin"
+
 
       - name: Configure npm registry
         shell: bash
