@@ -661,40 +661,46 @@ jobs:
         run: |
           set -euo pipefail
 
-          PROJECT="samples/${{ inputs.sample_dir }}/ohos"
+          PROJECT="samples/${{ inputs.sample_dir }}"
+          OHOS_PROJECT="$PROJECT/ohos"
 
-          cd "$PROJECT"
+          echo "===== 工程目录 ====="
+          pwd
+          ls -la "$OHOS_PROJECT"
+
+          echo "===== Hvigor 配置文件 ====="
+          find "$OHOS_PROJECT" -maxdepth 3 \
+            -name 'hvigor-config.json5' -print
+
+          echo "===== 检查配置文件 ====="
+          test -f "$OHOS_PROJECT/ohos/hvigor/hvigor-config.json5" && \
+            echo "错误：意外的嵌套目录" || true
+
+          test -f "$OHOS_PROJECT/hvigor/hvigor-config.json5" || {
+            echo "::error::ohos/hvigor/hvigor-config.json5 不存在"
+            exit 1
+          }
+
+          echo "===== 启动器内容 ====="
+          sed -n '1,200p' "$OHOS_PROJECT/ohos/hvigorw"
+
+          echo "===== Hvigor Wrapper 内容 ====="
+          if [ -f "$OHOS_PROJECT/ohos/hvigor/hvigor-wrapper.js" ]; then
+            sed -n '1,240p' \
+              "$OHOS_PROJECT/ohos/hvigor/hvigor-wrapper.js"
+          fi
+
+          echo "===== Hvigor 配置 ====="
+          cat "$OHOS_PROJECT/ohos/hvigor/hvigor-config.json5"
 
           echo "===== Node ====="
-          node -v
+          node --version
 
           echo "===== npm ====="
-          npm -v
+          npm --version
 
           echo "===== ohpm ====="
           ohpm --version || true
-
-          echo "===== Hvigor 启动器 ====="
-          ls -la hvigorw
-
-          echo "===== Hvigor 实际版本 ====="
-          ./hvigorw --version
-
-          echo "===== 项目插件安装情况 ====="
-
-          find . \
-            -path '*/node_modules/@ohos/hvigor-ohos-plugin/package.json' \
-            -print 2>/dev/null || true
-
-          echo "===== Hvigor 相关配置 ====="
-
-          grep -R -n -E \
-            '"@ohos/hvigor"|"@ohos/hvigor-ohos-plugin"|3\.0\.2|6\.26\.9' \
-            --include='*.json5' \
-            --include='*.json' \
-            --include='*.yaml' \
-            --include='*.yml' \
-            . | head -100 || true
 
       # ============================================================
       # 11. 构建 HAP
