@@ -1,3 +1,4 @@
+
 name: Build OHOS HAP from GitCode
 
 on:
@@ -28,23 +29,41 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 120
+
     steps:
+      # ============================================================
+      # 1. 获取源码
+      # ============================================================
+
       - name: Clone flutter_samples (GitCode)
+        shell: bash
         run: |
-          git clone --depth 1 -b ${{ inputs.samples_branch }} \
+          set -euo pipefail
+
+          git clone --depth 1 -b "${{ inputs.samples_branch }}" \
             https://gitcode.com/CPF-Flutter/flutter_samples.git samples
 
       - name: Clone flutter_flutter (GitCode)
-        run: |
-          git clone --depth 1 -b ${{ inputs.flutter_ref }} \
-            https://gitcode.com/CPF-Flutter/flutter_flutter.git flutter_flutter
-
-      # ========== 新增：给 SDK 目录校验打补丁（必须在任何 flutter 命令之前）==========
-      - name: Patch flutter_tools SDK validation (CI workaround)
+        shell: bash
         run: |
           set -euo pipefail
-          F=flutter_flutter/packages/flutter_tools/lib/src/ohos/ohos_sdk.dart
-          echo "==== 补丁前：所有 valid 校验函数 ===="
+
+          git clone --depth 1 -b "${{ inputs.flutter_ref }}" \
+            https://gitcode.com/CPF-Flutter/flutter_flutter.git flutter_flutter
+
+      # ============================================================
+      # 2. 修补 Flutter OHOS SDK 校验
+      # 必须在任何 Flutter 命令之前
+      # ============================================================
+
+      - name: Patch flutter_tools SDK validation
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          F="flutter_flutter/packages/flutter_tools/lib/src/ohos/ohos_sdk.dart"
+
+          echo "==== 补丁前 ===="
           grep -n "static bool valid" "$F" || true
 
           awk '
@@ -55,91 +74,153 @@ jobs:
             }
             { print }
           ' "$F" > "$F.tmp"
+
           mv "$F.tmp" "$F"
 
-          echo "==== 补丁后：注入点 ===="
+          echo "==== 补丁后 ===="
           grep -n "CI patch" "$F" || true
+
           COUNT=$(grep -c "CI patch" "$F" || true)
-          echo "注入数量: $COUNT (预期 4)"
+
+          echo "注入数量: $COUNT"
+
           if [ "$COUNT" -lt 4 ]; then
-            echo "::error::补丁未完整命中（预期 4 处校验函数：2x validSdkDirectory + 2x validApiXX）"
+            echo "::error::SDK 校验补丁未完整命中"
             exit 1
           fi
 
-      - uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: "17" }
-      - uses: actions/setup-node@v4
+      # ============================================================
+      # 3. 安装基础环境
+      # ============================================================
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
           node-version: "24.14.1"
 
-      - name: Install ohpm (shim) and hvigor
+      - name: Install ohpm shim and Hvigor
+        shell: bash
         run: |
           set -euo pipefail
+
           npm config set registry https://repo.huaweicloud.com/repository/npm/
           npm config set @ohos:registry https://repo.harmonyos.com/npm/
-          echo "frozen-lockfile=false" >> $HOME/.npmrc
-          echo "==== npmrc 校验 ===="
+
+          echo "frozen-lockfile=false" >> "$HOME/.npmrc"
+
+          echo "==== npm 配置 ===="
           npm config get registry
           npm config get @ohos:registry
 
-          # ---- ohpm 替身：真实 ohpm 无法匿名获取（仅随 DevEco/官网协议下载分发）----
-          # flutter_tools 只调用 `ohpm install [--all]`；samples 的 ohos 依赖
-          # （flutter.har 等）全部由 hvigor 本地 file: 解析，不经 ohpm registry
-          mkdir -p $HOME/ohpm-shim
-          cat > $HOME/ohpm-shim/ohpm <<'SH'
+          # ohpm shim
+          # 注意：这里仅跳过 ohpm 安装，不能代替真实 ohpm。
+          mkdir -p "$HOME/ohpm-shim"
+
+          cat > "$HOME/ohpm-shim/ohpm" <<'SH'
           #!/usr/bin/env bash
+
           case "${1:-}" in
             install)
-              echo "[ohpm shim] install $* — skipped (deps resolved locally by hvigor)"
-              exit 0 ;;
+              echo "[ohpm shim] install $* — skipped"
+              exit 0
+              ;;
             config|list|version|-v|--version)
-              echo "ohpm-shim 1.0.0"; exit 0 ;;
+              echo "ohpm-shim 1.0.0"
+              exit 0
+              ;;
             *)
-              echo "[ohpm shim] passthrough-noop: $*"; exit 0 ;;
+              echo "[ohpm shim] passthrough-noop: $*"
+              exit 0
+              ;;
           esac
           SH
-          chmod +x $HOME/ohpm-shim/ohpm
-          echo "$HOME/ohpm-shim" >> $GITHUB_PATH
-          export PATH="$HOME/ohpm-shim:$PATH"
-          ohpm --version   # 自检
 
-          # ---- hvigor（此前 npm 安装已验证可用，保持不动）----
-          npm install -g @ohos/hvigor @ohos/hvigor-ohos-plugin || true
-          echo "$(npm prefix -g)/bin" >> $GITHUB_PATH
+          chmod +x "$HOME/ohpm-shim/ohpm"
+
+          echo "$HOME/ohpm-shim" >> "$GITHUB_PATH"
+          export PATH="$HOME/ohpm-shim:$PATH"
+
+          ohpm --version
+
+          # 安装全局 Hvigor，作为备用工具
+          npm install -g @ohos/hvigor@6.26.9
+
+          echo "$(npm prefix -g)/bin" >> "$GITHUB_PATH"
           export PATH="$(npm prefix -g)/bin:$PATH"
-          if ! command -v hvigorw >/dev/null && command -v hvigor >/dev/null; then
-            ln -sf "$(command -v hvigor)" "$(npm prefix -g)/bin/hvigorw"
-          fi
-          which hvigorw && hvigorw --version || echo "::warning::hvigorw 不可用（构建用工程自带的，可忽略）"
+
+          echo "==== Node ===="
+          node -v
+
+          echo "==== npm ===="
+          npm -v
+
+          echo "==== 全局 Hvigor ===="
+          hvigor --version || true
+
+      # ============================================================
+      # 4. 获取 HarmonyOS SDK
+      # ============================================================
 
       - name: Query OHOS SDK URL
         id: sdk
+        shell: bash
         run: |
           set -euo pipefail
+
           query_component() {
-            component=$1
-            curl -fsSL 'https://dcp.openharmony.cn/api/daily_build/build/list/component' \
+            local component="$1"
+
+            curl -fsSL \
+              'https://dcp.openharmony.cn/api/daily_build/build/list/component' \
               -H 'Accept: application/json, text/plain, */*' \
               -H 'Content-Type: application/json' \
               --data-raw '{
-                "projectName":"openharmony","branch":"master","pageNum":1,"pageSize":10,
-                "deviceLevel":"","component":"'"${component}"'","type":1,
-                "startTime":"2025010100000000","endTime":"20990101235959",
-                "sortType":"","sortField":"","hardwareBoard":"","buildStatus":"success",
-                "buildFailReason":"","withDomain":1
+                "projectName":"openharmony",
+                "branch":"master",
+                "pageNum":1,
+                "pageSize":10,
+                "deviceLevel":"",
+                "component":"'"${component}"'",
+                "type":1,
+                "startTime":"2025010100000000",
+                "endTime":"20990101235959",
+                "sortType":"",
+                "sortField":"",
+                "hardwareBoard":"",
+                "buildStatus":"success",
+                "buildFailReason":"",
+                "withDomain":1
               }'
           }
+
           query_component "ohos-sdk-public" > /tmp/pub.json
+
           URL=$(jq -r '.data.list.dataList[0].obsPath // empty' /tmp/pub.json)
+
           if [ -z "$URL" ]; then
             query_component "ohos-sdk-full" > /tmp/full.json
             URL=$(jq -r '.data.list.dataList[0].obsPath // empty' /tmp/full.json)
           fi
-          [ -n "$URL" ] || { echo "::error::未能解析出 SDK 地址"; exit 1; }
-          VER=$(echo "$URL" | sed -E 's|.*/Daily_Version/||; s|/[^/]+$||; s|/|_|g')
-          echo "url=$URL" >> $GITHUB_OUTPUT
-          echo "ver=$VER" >> $GITHUB_OUTPUT
-          echo "SDK URL : $URL"; echo "CacheKey: ohos-sdk-$VER"
+
+          if [ -z "$URL" ]; then
+            echo "::error::未能解析出 SDK 下载地址"
+            exit 1
+          fi
+
+          VER=$(echo "$URL" |
+            sed -E 's|.*/Daily_Version/||; s|/[^/]+$||; s|/|_|g')
+
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "ver=$VER" >> "$GITHUB_OUTPUT"
+
+          echo "SDK URL: $URL"
+          echo "CacheKey: ohos-sdk-$VER"
 
       - name: Restore SDK cache
         id: sdk-cache
@@ -150,10 +231,17 @@ jobs:
 
       - name: Download OHOS SDK
         if: steps.sdk-cache.outputs.cache-hit != 'true'
+        shell: bash
         run: |
           set -euo pipefail
+
           mkdir -p .sdk-cache
-          curl -fL --retry 3 -A "Mozilla/5.0" -o .sdk-cache/ohos-sdk.tar.gz "${{ steps.sdk.outputs.url }}"
+
+          curl -fL --retry 3 \
+            -A "Mozilla/5.0" \
+            -o .sdk-cache/ohos-sdk.tar.gz \
+            "${{ steps.sdk.outputs.url }}"
+
           ls -lh .sdk-cache/ohos-sdk.tar.gz
 
       - name: Save SDK cache
@@ -163,92 +251,162 @@ jobs:
           path: .sdk-cache/ohos-sdk.tar.gz
           key: ohos-sdk-${{ steps.sdk.outputs.ver }}
 
+      # ============================================================
+      # 5. 组装 SDK 目录
+      # ============================================================
+
       - name: Assemble OHOS SDK
+        shell: bash
         run: |
           set -euo pipefail
-          mkdir -p $HOME/ohos-sdk-unpack
-          tar -zxf .sdk-cache/ohos-sdk.tar.gz -C $HOME/ohos-sdk-unpack
-          echo "==== 解压后顶层结构 ===="; ls -la $HOME/ohos-sdk-unpack
 
-          SRC=$(find $HOME/ohos-sdk-unpack -maxdepth 3 -type f -name "native-linux-x64-*.zip" -printf '%h\n' | head -1)
+          mkdir -p "$HOME/ohos-sdk-unpack"
+
+          tar -zxf .sdk-cache/ohos-sdk.tar.gz \
+            -C "$HOME/ohos-sdk-unpack"
+
+          echo "==== SDK 顶层结构 ===="
+          ls -la "$HOME/ohos-sdk-unpack"
+
+          SRC=$(find "$HOME/ohos-sdk-unpack" \
+            -maxdepth 4 \
+            -type f \
+            -name "native-linux-x64-*.zip" \
+            -printf '%h\n' | head -1)
+
           if [ -z "$SRC" ]; then
-            SRC=$(find $HOME/ohos-sdk-unpack -maxdepth 4 -type d -name native -printf '%h\n' | head -1)
+            SRC=$(find "$HOME/ohos-sdk-unpack" \
+              -maxdepth 4 \
+              -type d \
+              -name native \
+              -printf '%h\n' | head -1)
           fi
-          [ -n "$SRC" ] || { echo "::error::未找到 native 组件"; exit 1; }
-          echo "组件所在目录: $SRC"; cd "$SRC"; ls -la
 
-          for z in native-linux-x64-*.zip toolchains-linux-x64-*.zip ets-linux-x64-*.zip js-linux-x64-*.zip; do
-            [ -e "$z" ] && unzip -q -o "$z" || true
+          if [ -z "$SRC" ]; then
+            echo "::error::未找到 native SDK 组件"
+            exit 1
+          fi
+
+          echo "组件目录: $SRC"
+
+          cd "$SRC"
+
+          for z in \
+            native-linux-x64-*.zip \
+            toolchains-linux-x64-*.zip \
+            ets-linux-x64-*.zip \
+            js-linux-x64-*.zip
+          do
+            if [ -e "$z" ]; then
+              unzip -q -o "$z"
+            fi
           done
+
           for d in native toolchains ets js; do
-            [ -d "$d" ] || { echo "::error::缺少组件: $d"; exit 1; }
+            if [ ! -d "$d" ]; then
+              echo "::error::缺少 SDK 组件: $d"
+              exit 1
+            fi
           done
 
-          # ---- 根 A：DevEco 风格（DEVECO_SDK_HOME / HOS_SDK_HOME）----
-          OHOS=$HOME/ohos-sdk
-          mkdir -p $OHOS/default/openharmony
-          mv native toolchains ets js $OHOS/default/openharmony/
-          # default 下也直连一份组件（兼容两种 DevEco 布局解读）
-          for d in ets js native toolchains; do ln -sfn openharmony/$d $OHOS/default/$d; done
+          # DevEco 风格目录
+          OHOS="$HOME/ohos-sdk"
 
-          API=$(jq -r '.apiVersion // empty' $OHOS/default/openharmony/toolchains/oh-uni-package.json 2>/dev/null || true)
-          [ -n "$API" ] || API=$(jq -r '.apiVersion // empty' $OHOS/default/openharmony/toolchains/package.json 2>/dev/null || true)
-          [ -n "$API" ] || API=26
-          echo "检测到 SDK API 版本: $API"
-          echo "OHOS_API=$API" >> $GITHUB_ENV
+          mkdir -p "$OHOS/default/openharmony"
 
-          ln -sfn default $OHOS/$API
-          mkdir -p $OHOS/openharmony && ln -sfn ../default/openharmony $OHOS/openharmony/$API
-          mkdir -p $OHOS/licenses
+          mv native toolchains ets js "$OHOS/default/openharmony/"
 
-          # ---- 根 B：数字 API 目录（OHOS_SDK_HOME，doctor 已验证可用）----
-          HOS=$HOME/hos-sdk-root
-          mkdir -p $HOS/$API
           for d in ets js native toolchains; do
-            cp -a $OHOS/default/openharmony/$d $HOS/$API/$d
+            ln -sfn "openharmony/$d" "$OHOS/default/$d"
           done
-          ln -sfn $API $HOS/default
-          mkdir -p $HOS/licenses
 
-          echo "==== 布局自检 ===="
-          ls -la $OHOS $HOS
+          # 检测 API 版本
+          API=$(jq -r '.apiVersion // empty' \
+            "$OHOS/default/openharmony/toolchains/oh-uni-package.json" \
+            2>/dev/null || true)
 
-          echo "OHOS_SDK_HOME=$HOS" >> $GITHUB_ENV
-          echo "HOS_SDK_HOME=$OHOS" >> $GITHUB_ENV
-          echo "DEVECO_SDK_HOME=$OHOS" >> $GITHUB_ENV
-          echo "HDC_HOME=$OHOS/default/openharmony/toolchains" >> $GITHUB_ENV
-          echo "$OHOS/default/openharmony/toolchains" >> $GITHUB_PATH
+          if [ -z "$API" ]; then
+            API=$(jq -r '.apiVersion // empty' \
+              "$OHOS/default/openharmony/toolchains/package.json" \
+              2>/dev/null || true)
+          fi
 
-      - name: 自动修复 HarmonyOS build-profile.json5
+          if [ -z "$API" ]; then
+            API=26
+          fi
+
+          echo "检测到 SDK API: $API"
+
+          # 当前工作流按 API 26 对应的 6.0.0 版本格式配置
+          SDK_VERSION="6.0.0 ($API)"
+
+          echo "OHOS_API=$API" >> "$GITHUB_ENV"
+          echo "OHOS_SDK_VERSION=$SDK_VERSION" >> "$GITHUB_ENV"
+
+          ln -sfn default "$OHOS/$API"
+
+          mkdir -p "$OHOS/openharmony"
+          ln -sfn ../default/openharmony "$OHOS/openharmony/$API"
+
+          mkdir -p "$OHOS/licenses"
+
+          # Flutter tools 使用的 SDK 目录
+          HOS="$HOME/hos-sdk-root"
+
+          mkdir -p "$HOS/$API"
+
+          for d in ets js native toolchains; do
+            cp -a "$OHOS/default/openharmony/$d" "$HOS/$API/$d"
+          done
+
+          ln -sfn "$API" "$HOS/default"
+
+          mkdir -p "$HOS/licenses"
+
+          echo "==== SDK 目录检查 ===="
+          ls -la "$OHOS"
+          ls -la "$HOS"
+
+          echo "OHOS_SDK_HOME=$HOS" >> "$GITHUB_ENV"
+          echo "HOS_SDK_HOME=$OHOS" >> "$GITHUB_ENV"
+          echo "DEVECO_SDK_HOME=$OHOS" >> "$GITHUB_ENV"
+          echo "HDC_HOME=$OHOS/default/openharmony/toolchains" >> "$GITHUB_ENV"
+
+          echo "$OHOS/default/openharmony/toolchains" >> "$GITHUB_PATH"
+
+      # ============================================================
+      # 6. 修复 build-profile.json5
+      # ============================================================
+
+      - name: Fix HarmonyOS build-profile.json5
         shell: bash
         run: |
           set -euo pipefail
 
           PROFILE="samples/${{ inputs.sample_dir }}/ohos/build-profile.json5"
+
           API="${OHOS_API:-}"
+          SDK_VERSION="${OHOS_SDK_VERSION:-}"
 
           if [ ! -f "$PROFILE" ]; then
             echo "::error::找不到工程配置文件: $PROFILE"
             exit 1
           fi
 
-          if [ -z "$API" ]; then
-            echo "::error::OHOS_API 未设置"
+          if [ -z "$API" ] || [ -z "$SDK_VERSION" ]; then
+            echo "::error::OHOS SDK 版本未正确设置"
             exit 1
           fi
 
-          SDK_VERSION="${API}.0.0"
-
           echo "SDK API: $API"
           echo "SDK Version: $SDK_VERSION"
-          echo "配置文件: $PROFILE"
 
-          # 创建独立 Python 环境，安装 JSON5 解析器
           python3 -m venv "$RUNNER_TEMP/json5-env"
+
           "$RUNNER_TEMP/json5-env/bin/pip" install json5
 
-          # 动态修改 JSON5
-          "$RUNNER_TEMP/json5-env/bin/python" - "$PROFILE" "$SDK_VERSION" <<'PY'
+          "$RUNNER_TEMP/json5-env/bin/python" - \
+            "$PROFILE" "$SDK_VERSION" <<'PY'
           import json5
           import sys
 
@@ -259,10 +417,12 @@ jobs:
               config = json5.load(f)
 
           app = config.get("app")
+
           if not isinstance(app, dict):
               raise SystemExit("错误：缺少 app 配置")
 
           products = app.get("products")
+
           if not isinstance(products, list) or not products:
               raise SystemExit("错误：app.products 不存在或为空")
 
@@ -270,17 +430,15 @@ jobs:
 
           for product in products:
               if not isinstance(product, dict):
-                  raise SystemExit("错误：发现无效的 Product 配置")
+                  raise SystemExit("错误：发现无效 Product 配置")
 
               name = product.get("name")
 
               if name == "default":
                   default_found = True
 
-              # 使用当前安装的 SDK 作为编译版本
               product["compileSdkVersion"] = sdk_version
 
-              # 不覆盖已有的最低兼容版本
               if not product.get("compatibleSdkVersion"):
                   product["compatibleSdkVersion"] = sdk_version
 
@@ -291,18 +449,12 @@ jobs:
               )
 
           if not default_found:
-              raise SystemExit("错误：缺少 default Product，无法执行默认 HAP 构建")
+              raise SystemExit("错误：缺少 default Product")
 
           with open(path, "w", encoding="utf-8") as f:
-              json5.dump(
-                  config,
-                  f,
-                  indent=2,
-                  ensure_ascii=False
-              )
+              json5.dump(config, f, indent=2, ensure_ascii=False)
               f.write("\n")
 
-          # 重新读取，验证修改结果
           with open(path, "r", encoding="utf-8") as f:
               verified = json5.load(f)
 
@@ -310,325 +462,302 @@ jobs:
               assert product.get("compileSdkVersion") == sdk_version
               assert product.get("compatibleSdkVersion")
 
-          print("JSON5 配置修复及验证成功！")
+          print("build-profile.json5 修复成功")
           PY
 
-          echo "==== 最终 build-profile.json5 ===="
+          echo "==== 最终配置 ===="
           cat "$PROFILE"
 
-      - name: 升级 HarmonyOS 构建工具配置
+      # ============================================================
+      # 7. Bootstrap 官方 Hvigor 启动链
+      # ============================================================
+
+      - name: Bootstrap hvigorw
         shell: bash
         run: |
           set -euo pipefail
 
-          # 安装 JSON5 解析器
-          python3 -m pip install --user json5
-
-          PROJECT="samples/${{ inputs.sample_dir }}/ohos"
-
-          python3 - "$PROJECT" <<'PY'
-          import json5
-          import sys
-          from pathlib import Path
-
-          project = Path(sys.argv[1])
-
-          # 升级 Hvigor 配置
-          hvigor_file = project / "hvigor/hvigor-config.json5"
-
-          with hvigor_file.open("r", encoding="utf-8") as f:
-              config = json5.load(f)
-
-          config["hvigorVersion"] = "6.26.4"
-          config.setdefault("dependencies", {})[
-              "@ohos/hvigor-ohos-plugin"
-          ] = "6.26.4"
-          # 强制 Hvigor 使用 npm，绕过旧版 pnpm 7.30.0
-          config.setdefault("properties", {})[
-              "hvigor.dependency.useNpm"
-          ] = True
-
-          with hvigor_file.open("w", encoding="utf-8") as f:
-              json5.dump(config, f, indent=2, ensure_ascii=False)
-              f.write("\n")
-
-          # 升级项目 modelVersion
-          package_file = project / "oh-package.json5"
-
-          with package_file.open("r", encoding="utf-8") as f:
-              package = json5.load(f)
-
-          package["modelVersion"] = "26.0.0"
-
-          with package_file.open("w", encoding="utf-8") as f:
-              json5.dump(package, f, indent=2, ensure_ascii=False)
-              f.write("\n")
-
-          print("Hvigor 配置升级完成")
-          print("hvigorVersion:", config["hvigorVersion"])
-          print("plugin:", config["dependencies"]["@ohos/hvigor-ohos-plugin"])
-          print("modelVersion:", package["modelVersion"])
-          PY
-
-      - name: 配置 HarmonyOS npm 仓库
-        shell: bash
-        run: |
-          cat > ~/.npmrc <<'EOF'
-          registry=https://repo.huaweicloud.com/repository/npm/
-          @ohos:registry=https://repo.harmonyos.com/npm/
-          EOF
-
-          npm config get registry
-          npm config get @ohos:registry
-
-      - name: Bootstrap hvigorw (成套获取官方启动链)
-        run: |
-          set -euo pipefail
           DEST="samples/${{ inputs.sample_dir }}/ohos"
-          [ -d "$DEST" ] || { echo "::error::未找到 $DEST"; exit 1; }
 
-          echo "==== 工程原有 hvigor/ 内容（覆盖前留档）===="
-          ls -la "$DEST/hvigor/" || true
-          for f in "$DEST/hvigor"/*; do
-            echo "---- $(basename "$f") ----"; head -30 "$f" 2>/dev/null
-          done || true
-
-          # 1) 稀疏克隆官方示例，取整套 hvigor 目录 + 启动器
-          SRC_PROJ="code/SuperFeature/Widget/ArkTSCard/CanvasGame"
-          rm -rf /tmp/asamples
-          git clone --depth 1 --filter=blob:none --sparse \
-            https://gitee.com/southbridge/applications_app_samples.git /tmp/asamples
-          git -C /tmp/asamples sparse-checkout set "$SRC_PROJ"
-          echo "==== 官方工程 hvigor/ ===="; ls -la "/tmp/asamples/$SRC_PROJ/hvigor"
-
-          # 2) 整套替换：hvigor/ 下【所有文件】一并复制（config+js 同源配套，不再挑文件）
-          mkdir -p "$DEST/hvigor"
-          cp "/tmp/asamples/$SRC_PROJ/hvigor"/* "$DEST/hvigor/"
-          cp "/tmp/asamples/$SRC_PROJ/hvigorw" "$DEST/hvigorw"
-          chmod +x "$DEST/hvigorw"
-          # 修改启动器使用的 pnpm 版本，避免 pnpm 7 与 Node 24 不兼容
-          echo "==== 检查 pnpm 版本配置 ===="
-
-          grep -n -E 'pnpm|7\.30\.0' \
-            "$DEST/hvigor/hvigor-wrapper.js" \
-            "$DEST/hvigorw" || true
-
-          # 将旧版 pnpm 替换为兼容 Node 24 的版本
-            FOUND=0
-
-            for f in "$DEST/hvigor/hvigor-wrapper.js" "$DEST/hvigorw"; do
-              if [ -f "$f" ] && grep -q '7\.30\.0' "$f"; then
-                sed -i 's/7\.30\.0/9.15.9/g' "$f"
-                FOUND=1
-              fi
-            done
-
-            if [ "$FOUND" -ne 1 ]; then
-              echo "::error::没有在启动器中找到 pnpm 7.30.0，请检查实际引用位置"
-              grep -R -n '7\.30\.0' "$DEST/hvigor" "$DEST/hvigorw" || true
-              exit 1
-            fi
-
-            echo "==== 修改后的 pnpm 配置 ===="
-            grep -n -E 'pnpm|9\.15\.9' \
-              "$DEST/hvigor/hvigor-wrapper.js" \
-              "$DEST/hvigorw" || true
-
-          # 3) 校验
-          node --check "$DEST/hvigor/hvigor-wrapper.js"
-          CFG="$DEST/hvigor/hvigor-config.json5"
-          echo "==== 替换后 config ===="; cat "$CFG"
-          grep -qE '"(modelVersion|hvigorVersion)"' "$CFG" \
-            || { echo "::error::config 缺 modelVersion/hvigorVersion"; exit 1; }
-
-          echo "==== bootstrap 完成 ===="
-          ls -la "$DEST/hvigorw" "$DEST/hvigor/"
-
-      - name: Upgrade Hvigor
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          CONFIG="samples/flutter_music_player/ohos/hvigor/hvigor-config.json5"
-
-          if [ ! -f "$CONFIG" ]; then
-            echo "::error::找不到 $CONFIG"
+          if [ ! -d "$DEST" ]; then
+            echo "::error::找不到 HarmonyOS 工程目录"
             exit 1
           fi
 
-          sed -i \
-            -e 's/"hvigorVersion": "3.0.2"/"hvigorVersion": "6.26.9"/' \
-            -e 's/"@ohos\/hvigor-ohos-plugin": "3.0.2"/"@ohos\/hvigor-ohos-plugin": "6.26.9"/' \
-            "$CONFIG"
+          echo "==== 原有 Hvigor 配置 ===="
+          ls -la "$DEST/hvigor/" || true
 
-          cat "$CONFIG"
+          # 获取官方示例启动链
+          SRC_PROJ="code/SuperFeature/Widget/ArkTSCard/CanvasGame"
 
-      - name: 检查 Hvigor 版本锁定配置
-        shell: bash
-        run: |
-          cd "samples/${{ inputs.sample_dir }}/ohos"
+          rm -rf /tmp/asamples
 
-          echo "===== Node ====="
-          node -v
+          git clone --depth 1 --filter=blob:none --sparse \
+            https://gitee.com/southbridge/applications_app_samples.git \
+            /tmp/asamples
 
-          echo "===== ohpm ====="
-          ohpm -v || true
+          git -C /tmp/asamples sparse-checkout set "$SRC_PROJ"
 
-          echo "===== Hvigor ====="
-          ./hvigorw --version || true
+          SRC="/tmp/asamples/$SRC_PROJ"
 
-          for file in \
-            hvigor/hvigor-config.json5 \
-            oh-package-lock.json5 \
-            hvigorfile.ts \
-            hvigorfile.js
+          if [ ! -d "$SRC/hvigor" ] || [ ! -f "$SRC/hvigorw" ]; then
+            echo "::error::官方示例中缺少 Hvigor 启动文件"
+            exit 1
+          fi
+
+          echo "==== 官方 Hvigor 目录 ===="
+          ls -la "$SRC/hvigor"
+
+          # 完整替换 hvigor 目录
+          mkdir -p "$DEST/hvigor"
+
+          rm -rf "$DEST/hvigor/"*
+
+          cp -a "$SRC/hvigor/." "$DEST/hvigor/"
+
+          cp "$SRC/hvigorw" "$DEST/hvigorw"
+
+          chmod +x "$DEST/hvigorw"
+
+          # 检查 pnpm 版本
+          echo "==== 检查 pnpm 版本 ===="
+
+          FOUND=0
+
+          for f in \
+            "$DEST/hvigor/hvigor-wrapper.js" \
+            "$DEST/hvigorw"
           do
-            if [ -f "$file" ]; then
-              echo "===== $file ====="
-              cat "$file"
+            if [ -f "$f" ] && grep -q '7\.30\.0' "$f"; then
+              sed -i 's/7\.30\.0/9.15.9/g' "$f"
+              FOUND=1
             fi
           done
 
-          echo "===== Hvigor 版本引用 ====="
-          grep -R -n -E \
-            '"@ohos/hvigor"|"@ohos/hvigor-ohos-plugin"|3\.0\.2' \
-            --include='*.json5' --include='*.yaml' --include='*.yml' . \
-            | head -100 || true
+          if [ "$FOUND" -eq 1 ]; then
+            echo "已将 pnpm 7.30.0 替换为 9.15.9"
+          else
+            echo "::warning::未找到 pnpm 7.30.0，保留官方启动器配置"
+          fi
 
-      - name: 更新 HarmonyOS 项目构建配置
+          echo "==== pnpm 配置 ===="
+
+          grep -n -E 'pnpm|7\.30\.0|9\.15\.9' \
+            "$DEST/hvigor/hvigor-wrapper.js" \
+            "$DEST/hvigorw" || true
+
+          # 检查 JS 语法
+          if [ -f "$DEST/hvigor/hvigor-wrapper.js" ]; then
+            node --check "$DEST/hvigor/hvigor-wrapper.js"
+          fi
+
+          echo "==== Bootstrap 完成 ===="
+          ls -la "$DEST/hvigorw"
+          ls -la "$DEST/hvigor/"
+
+      # ============================================================
+      # 8. 统一升级 Hvigor 配置
+      # 必须放在 Bootstrap 之后
+      # ============================================================
+
+      - name: Upgrade Hvigor Config
         shell: bash
         run: |
           set -euo pipefail
 
-          python3 -m venv "$RUNNER_TEMP/json5-env"
-          "$RUNNER_TEMP/json5-env/bin/pip" install json5
-
           PROJECT="samples/${{ inputs.sample_dir }}/ohos"
 
-          "$RUNNER_TEMP/json5-env/bin/python" - "$PROJECT" <<'PY'
+          PYTHON="$RUNNER_TEMP/json5-env/bin/python"
+
+          if [ ! -x "$PYTHON" ]; then
+            echo "::error::JSON5 Python 环境不存在"
+            exit 1
+          fi
+
+          "$PYTHON" - "$PROJECT" <<'PY'
           import json5
           import sys
           from pathlib import Path
 
           project = Path(sys.argv[1])
 
-          # Hvigor 配置
           config_file = project / "hvigor/hvigor-config.json5"
+
+          if not config_file.exists():
+              raise SystemExit(f"找不到 Hvigor 配置: {config_file}")
 
           with config_file.open(encoding="utf-8") as f:
               config = json5.load(f)
 
+          # 统一 Hvigor 版本
           config["hvigorVersion"] = "6.26.9"
+
           config.setdefault("dependencies", {})[
               "@ohos/hvigor-ohos-plugin"
           ] = "6.26.9"
 
+          config.setdefault("properties", {})[
+              "hvigor.dependency.useNpm"
+          ] = True
+
           with config_file.open("w", encoding="utf-8") as f:
-              json5.dump(config, f, indent=2)
+              json5.dump(config, f, indent=2, ensure_ascii=False)
               f.write("\n")
 
-          # 项目版本
-          package_file = project / "oh-package.json5"
-
-          with package_file.open(encoding="utf-8") as f:
-              package = json5.load(f)
-
-          package["modelVersion"] = "26.0.0"
-
-          with package_file.open("w", encoding="utf-8") as f:
-              json5.dump(package, f, indent=2)
-              f.write("\n")
-
-          # 编译 SDK 版本
-          profile_file = project / "build-profile.json5"
-
-          with profile_file.open(encoding="utf-8") as f:
-              profile = json5.load(f)
-
-          products = profile["app"]["products"]
-
-          for product in products:
-              product["compileSdkVersion"] = "26.0.0"
-
-          with profile_file.open("w", encoding="utf-8") as f:
-              json5.dump(profile, f, indent=2)
-              f.write("\n")
-
-          print("Hvigor:", config["hvigorVersion"])
-          print("Plugin:", config["dependencies"]["@ohos/hvigor-ohos-plugin"])
-          print("Model:", package["modelVersion"])
-          print("Compile SDK: 26.0.0")
+          print("Hvigor 配置已更新")
+          print(json5.dumps(config, indent=2, ensure_ascii=False))
           PY
 
-      - name: Verify Hvigor
+      # ============================================================
+      # 9. 验证 Hvigor 配置
+      # ============================================================
+
+      - name: Verify Hvigor Config
+        shell: bash
         run: |
-          cd samples/flutter_music_player/ohos
+          set -euo pipefail
+
+          PROJECT="samples/${{ inputs.sample_dir }}/ohos"
+
+          cd "$PROJECT"
 
           echo "===== Hvigor 配置 ====="
           cat hvigor/hvigor-config.json5
 
+          echo "===== 检查 Hvigor 版本 ====="
+
+          grep -q '"hvigorVersion": "6.26.9"' \
+            hvigor/hvigor-config.json5
+
+          grep -q '"@ohos/hvigor-ohos-plugin": "6.26.9"' \
+            hvigor/hvigor-config.json5
+
+          echo "Hvigor 配置检查通过"
+
+      # ============================================================
+      # 10. 检查启动器及依赖解析
+      # ============================================================
+
+      - name: Verify Hvigor Dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT="samples/${{ inputs.sample_dir }}/ohos"
+
+          cd "$PROJECT"
+
+          echo "===== Node ====="
+          node -v
+
+          echo "===== npm ====="
+          npm -v
+
+          echo "===== ohpm ====="
+          ohpm --version || true
+
+          echo "===== Hvigor 启动器 ====="
+          ls -la hvigorw
+
           echo "===== Hvigor 实际版本 ====="
           ./hvigorw --version
 
+          echo "===== 项目插件安装情况 ====="
+
+          find . \
+            -path '*/node_modules/@ohos/hvigor-ohos-plugin/package.json' \
+            -print 2>/dev/null || true
+
+          echo "===== Hvigor 相关配置 ====="
+
+          grep -R -n -E \
+            '"@ohos/hvigor"|"@ohos/hvigor-ohos-plugin"|3\.0\.2|6\.26\.9' \
+            --include='*.json5' \
+            --include='*.json' \
+            --include='*.yaml' \
+            --include='*.yml' \
+            . | head -100 || true
+
+      # ============================================================
+      # 11. 构建 HAP
+      # ============================================================
+
       - name: Build HAP (unsigned)
+        shell: bash
         working-directory: samples/${{ inputs.sample_dir }}
         run: |
-          # 1) 工程自带 hvigorw 上 PATH（flutter_tools 调全局 hvigorw）
+          set -euo pipefail
+
+          # 工程自带 Hvigor 启动器
           if [ -f ohos/hvigorw ]; then
-            chmod +x ohos/hvigorw || true
+            chmod +x ohos/hvigorw
             export PATH="$PWD/ohos:$PATH"
-            echo "使用工程自带 hvigorw: $PWD/ohos/hvigorw"
-          fi
-          # 2) 兜底：cwd 感知 shim（运行时在 $PWD 下找 hvigorw）
-          if ! command -v hvigorw >/dev/null 2>&1; then
-            echo "工程未带 ohos/hvigorw，安装兜底 shim"
-            mkdir -p $HOME/hvigor-shim
-            cat > $HOME/hvigor-shim/hvigorw <<'SH'
-          #!/usr/bin/env bash
-          for c in "$PWD/hvigorw" "$PWD/ohos/hvigorw"; do
-            [ -x "$c" ] && exec "$c" "$@"
-          done
-          echo "hvigorw shim: not found near $PWD" >&2
-          ls -la "$PWD" "$PWD/ohos" 2>/dev/null || true
-          exit 1
-          SH
-            chmod +x $HOME/hvigor-shim/hvigorw
-            export PATH="$HOME/hvigor-shim:$PATH"
+
+            echo "使用工程 Hvigor 启动器:"
+            command -v hvigorw
+          else
+            echo "::error::工程中缺少 ohos/hvigorw"
+            exit 1
           fi
 
-          echo "$GITHUB_WORKSPACE/flutter_flutter/bin" >> $GITHUB_PATH
+          # Flutter OHOS SDK
           export PATH="$GITHUB_WORKSPACE/flutter_flutter/bin:$PATH"
 
-          echo "==== hvigorw 自检 ===="
-          command -v hvigorw && hvigorw --version || echo "::warning::hvigorw --version 失败但先继续（首次可能在拉取 hvigor 本体）"
+          echo "==== 环境变量 ===="
+          echo "OHOS_SDK_HOME=$OHOS_SDK_HOME"
+          echo "HOS_SDK_HOME=$HOS_SDK_HOME"
+          echo "OHOS_API=$OHOS_API"
+          echo "OHOS_SDK_VERSION=$OHOS_SDK_VERSION"
 
+          echo "==== Hvigor 自检 ===="
+          hvigorw --version
+
+          echo "==== Flutter 版本 ===="
           flutter --version
+
+          echo "==== Flutter Doctor ===="
           flutter doctor -v || true
+
+          echo "==== Pub Get ===="
           flutter pub get
 
           export CI=false
           export npm_config_frozen_lockfile=false
           export NPM_CONFIG_FROZEN_LOCKFILE=false
 
-          flutter build hap --release --no-codesign --target-platform ${{ inputs.target_platform }} -v
+          echo "==== 开始构建 HAP ===="
+
+          flutter build hap \
+            --release \
+            --no-codesign \
+            --target-platform "${{ inputs.target_platform }}" \
+            -v
+
+      # ============================================================
+      # 12. 收集 Hvigor 日志
+      # ============================================================
 
       - name: Collect Hvigor Logs
         if: always()
+        shell: bash
         run: |
-          echo "========== Hvigor version =========="
-          node --version
-          find "$HOME/.hvigor" -type f \
-            \( -name "*.log" -o -name "*.txt" \) \
-            -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -20
+          echo "========== Node =========="
+          node --version || true
 
-          echo "========== Recent Hvigor logs =========="
-          find "$HOME/.hvigor" -type f \
-            \( -name "*.log" -o -name "*.txt" \) \
+          echo "========== Hvigor log files =========="
+
+          find "$HOME/.hvigor" \
+            -path '*/node_modules' -prune -o \
+            -type f \( -name '*.log' -o -name 'hvigor*.txt' \) \
             -mmin -30 -print 2>/dev/null |
           while read -r file; do
             echo "========== $file =========="
-            tail -n 200 "$file"
+            tail -n 150 "$file"
           done
+
+      # ============================================================
+      # 13. 上传 HAP
+      # ============================================================
 
       - name: Upload HAP
         uses: actions/upload-artifact@v4
