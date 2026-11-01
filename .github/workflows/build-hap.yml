@@ -707,19 +707,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          # 工程自带 Hvigor 启动器
-          if [ -f ohos/hvigorw ]; then
-            chmod +x ohos/hvigorw
-            export PATH="$PWD/ohos:$PATH"
-
-            echo "使用工程 Hvigor 启动器:"
-            command -v hvigorw
-          else
+          if [ ! -f ohos/hvigorw ]; then
             echo "::error::工程中缺少 ohos/hvigorw"
             exit 1
           fi
+          chmod +x ohos/hvigorw
 
-          # Flutter OHOS SDK
           export PATH="$GITHUB_WORKSPACE/flutter_flutter/bin:$PATH"
 
           echo "==== 环境变量 ===="
@@ -729,7 +722,7 @@ jobs:
           echo "OHOS_SDK_VERSION=$OHOS_SDK_VERSION"
 
           echo "==== Hvigor 自检 ===="
-          hvigorw --version
+          (cd ohos && ./hvigorw --version)
 
           echo "==== Flutter 版本 ===="
           flutter --version
